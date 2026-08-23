@@ -245,6 +245,43 @@ isolcpus=3 nohz_full=3 rcu_nocbs=3 irqaffinity=0-2
 - Bluetooth is already disabled if you followed the serial MIDI setup; also turn
   off Wi-Fi power saving if the box is headless and wired.
 
+### Core patches
+
+`patches/` holds performance patches applied at build time to a copy of the
+core; the submodule itself is never modified. They are **off by default** —
+`-DSC55D_PATCH_CORE=ON` enables them — because they change emulator behaviour in
+principle and have not been checked against real ROM audio yet.
+`patches/README.md` has the two-minute digest procedure for validating them on
+your ROMs, and lists what was measured and rejected.
+
+`--bench` prints an FNV-1a digest of the audio it renders precisely so this
+check is easy. A digest marked `(SILENT)` means the run produced no audio and
+the comparison is meaningless.
+
+### Where the time actually goes
+
+Callgrind, on a synthetic 32-slot PCM workload (no real ROMs — see the caveat
+below):
+
+| | share of retired instructions |
+|---|---|
+| `TIMER_Clock` | 29% |
+| `PCM_Update` | 28% |
+| `SM_Update` (sub-MCU) | 12% |
+| `MCU_Interrupt_Handle` | 4% |
+| `PCM_ReadROM` | 3% |
+
+Two things worth knowing from that. `TIMER_Clock` being the largest is a
+surprise, and it is what `patches/0001` targets. And `SM_Update` is 12% that
+simply disappears if you can use the `scb55` romset, which has no sub-MCU.
+
+Caveat: this profile used placeholder ROMs, so the MCU interpreter itself is
+under-represented — real firmware executes varied instructions instead of
+trapping. `TIMER_Clock` and `PCM_Update` are driven by cycle count rather than
+ROM content, so their absolute cost per second of audio is right; the MCU's
+share on top of them is not. Re-profile on the target with real ROMs before
+optimising anything else.
+
 ### Known ceiling
 
 sc55d renders and writes on one thread, so the ALSA buffer is the only slack: a

@@ -82,6 +82,64 @@ elseif(NOT SC55D_PGO STREQUAL "off")
 endif()
 
 #==============================================================================
+# Core patches
+#
+# Performance patches live in patches/ and are applied at build time to a copy
+# of the core under the build tree. The submodule is never written to: it stays
+# a pristine checkout of upstream, and every change we make is reviewable as a
+# patch in this repository. This is also how Buildroot will want it.
+#==============================================================================
+# Off by default: the patches are performance-only and reasoned to be
+# behaviour-preserving, but see patches/README.md -- they have not been checked
+# against real ROM audio, and the core has a history of a timer optimisation
+# that silently changed output. Turn this on after running the digest check.
+option(SC55D_PATCH_CORE "Apply patches/ to a private copy of the core" OFF)
+
+set(CORE_SRC_DIR "${NUKED_DIR}")
+
+if(SC55D_PATCH_CORE)
+    file(GLOB SC55D_PATCHES "${CMAKE_CURRENT_SOURCE_DIR}/patches/*.patch")
+    list(SORT SC55D_PATCHES)
+
+    if(SC55D_PATCHES)
+        find_program(SC55D_PATCH_EXE NAMES patch)
+        if(NOT SC55D_PATCH_EXE)
+            message(FATAL_ERROR "patch(1) not found; install it or configure with -DSC55D_PATCH_CORE=OFF")
+        endif()
+
+        # Re-run configure when a patch changes.
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${SC55D_PATCHES})
+
+        set(CORE_SRC_DIR "${CMAKE_BINARY_DIR}/core-patched")
+
+        # Start from a clean copy so re-configuring never double-applies.
+        file(REMOVE_RECURSE "${CORE_SRC_DIR}")
+        file(MAKE_DIRECTORY "${CORE_SRC_DIR}")
+        file(COPY "${NUKED_DIR}/src" DESTINATION "${CORE_SRC_DIR}")
+
+        foreach(patch IN LISTS SC55D_PATCHES)
+            get_filename_component(patch_name "${patch}" NAME)
+            execute_process(
+                COMMAND "${SC55D_PATCH_EXE}" -p1 --forward --input "${patch}"
+                WORKING_DIRECTORY "${CORE_SRC_DIR}"
+                RESULT_VARIABLE patch_result
+                OUTPUT_VARIABLE patch_output
+                ERROR_VARIABLE patch_output)
+            if(NOT patch_result EQUAL 0)
+                message(FATAL_ERROR
+                    "sc55d: ${patch_name} does not apply to this core checkout.\n"
+                    "The submodule has probably moved. Rebase the patch, or configure "
+                    "with -DSC55D_PATCH_CORE=OFF to build the core unmodified.\n"
+                    "${patch_output}")
+            endif()
+            message(STATUS "sc55d: applied ${patch_name}")
+        endforeach()
+    endif()
+else()
+    message(STATUS "sc55d: building the core unpatched (-DSC55D_PATCH_CORE=ON to apply patches/)")
+endif()
+
+#==============================================================================
 # Dependencies
 #==============================================================================
 find_package(ALSA REQUIRED)
@@ -96,25 +154,25 @@ find_package(Threads REQUIRED)
 # lets LTO and PGO cover the emulation loop as well as sc55d.
 #==============================================================================
 set(CORE_SOURCES
-    ${NUKED_DIR}/src/backend/config.cpp
-    ${NUKED_DIR}/src/backend/diagnostics.cpp
-    ${NUKED_DIR}/src/backend/emu.cpp
-    ${NUKED_DIR}/src/backend/file_hashing.cpp
-    ${NUKED_DIR}/src/backend/file_io.cpp
-    ${NUKED_DIR}/src/backend/lcd.cpp
-    ${NUKED_DIR}/src/backend/mcu.cpp
-    ${NUKED_DIR}/src/backend/mcu_interrupt.cpp
-    ${NUKED_DIR}/src/backend/mcu_opcodes.cpp
-    ${NUKED_DIR}/src/backend/mcu_timer.cpp
-    ${NUKED_DIR}/src/backend/pcm.cpp
-    ${NUKED_DIR}/src/backend/rom.cpp
-    ${NUKED_DIR}/src/backend/rom_io.cpp
-    ${NUKED_DIR}/src/backend/standard_romsets.cpp
-    ${NUKED_DIR}/src/backend/submcu.cpp
-    ${NUKED_DIR}/src/backend/sha/sha224-256.c
-    ${NUKED_DIR}/src/common/gain.cpp
-    ${NUKED_DIR}/src/common/path_util.cpp
-    ${NUKED_DIR}/src/common/rom_loader.cpp)
+    ${CORE_SRC_DIR}/src/backend/config.cpp
+    ${CORE_SRC_DIR}/src/backend/diagnostics.cpp
+    ${CORE_SRC_DIR}/src/backend/emu.cpp
+    ${CORE_SRC_DIR}/src/backend/file_hashing.cpp
+    ${CORE_SRC_DIR}/src/backend/file_io.cpp
+    ${CORE_SRC_DIR}/src/backend/lcd.cpp
+    ${CORE_SRC_DIR}/src/backend/mcu.cpp
+    ${CORE_SRC_DIR}/src/backend/mcu_interrupt.cpp
+    ${CORE_SRC_DIR}/src/backend/mcu_opcodes.cpp
+    ${CORE_SRC_DIR}/src/backend/mcu_timer.cpp
+    ${CORE_SRC_DIR}/src/backend/pcm.cpp
+    ${CORE_SRC_DIR}/src/backend/rom.cpp
+    ${CORE_SRC_DIR}/src/backend/rom_io.cpp
+    ${CORE_SRC_DIR}/src/backend/standard_romsets.cpp
+    ${CORE_SRC_DIR}/src/backend/submcu.cpp
+    ${CORE_SRC_DIR}/src/backend/sha/sha224-256.c
+    ${CORE_SRC_DIR}/src/common/gain.cpp
+    ${CORE_SRC_DIR}/src/common/path_util.cpp
+    ${CORE_SRC_DIR}/src/common/rom_loader.cpp)
 
 # The core's config.h is generated from a template that wants the core's own
 # version, so read it out of the fork's CMakeLists instead of reporting ours.
@@ -132,7 +190,7 @@ if(_nuked_project MATCHES "VERSION ([0-9]+)\\.([0-9]+)\\.([0-9]+)")
 endif()
 set(NUKED_ENABLE_ASIO 0)
 set(NUKED_SOURCE "sc55d")
-configure_file(${NUKED_DIR}/src/backend/config.h.in backend/config.h @ONLY)
+configure_file(${CORE_SRC_DIR}/src/backend/config.h.in backend/config.h @ONLY)
 set(NUKED_CORE_VERSION ${CMAKE_PROJECT_VERSION})
 
 set(CMAKE_PROJECT_VERSION_MAJOR ${_sc55d_our_version_major})
@@ -162,8 +220,8 @@ add_executable(sc55d ${CORE_SOURCES} ${SC55D_SOURCES})
 
 target_include_directories(sc55d PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${NUKED_DIR}/src/backend
-    ${NUKED_DIR}/src/common
+    ${CORE_SRC_DIR}/src/backend
+    ${CORE_SRC_DIR}/src/common
     ${CMAKE_CURRENT_BINARY_DIR}/backend)
 
 target_link_libraries(sc55d PRIVATE ALSA::ALSA Threads::Threads)

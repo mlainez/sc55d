@@ -21,6 +21,32 @@
 namespace Bench {
 namespace {
 
+/* FNV-1a over the rendered samples.  Two builds that render the same audio
+ * print the same digest, which is how a change to the emulation core gets
+ * shown to be behaviour-preserving without needing a reference recording. */
+struct Digest {
+    uint64_t value = 1469598103934665603ull;
+    bool silent = true;
+
+    void Add(const int16_t *frames, int count)
+    {
+        const size_t samples = (size_t)count * 2;
+        for (size_t i = 0; i < samples; i++)
+        {
+            if (frames[i] != 0)
+                silent = false;
+        }
+
+        const uint8_t *bytes = reinterpret_cast<const uint8_t *>(frames);
+        const size_t length = samples * sizeof(int16_t);
+        for (size_t i = 0; i < length; i++)
+        {
+            value ^= bytes[i];
+            value *= 1099511628211ull;
+        }
+    }
+};
+
 struct Event {
     uint64_t frame;
     uint8_t data[3];
@@ -105,7 +131,7 @@ std::vector<Event> BuildSequence(double seconds, int rate)
 
 /* Renders `frames` frames, posting `events` as their time arrives.  Returns the
  * number of frames actually rendered (short only if interrupted). */
-uint64_t Render(uint64_t frames, const std::vector<Event> *events)
+uint64_t Render(uint64_t frames, const std::vector<Event> *events, Digest *digest)
 {
     const int page = Core::PageFrames();
     size_t next_event = 0;
@@ -122,6 +148,8 @@ uint64_t Render(uint64_t frames, const std::vector<Event> *events)
         while (Core::FramesReady() < (size_t)page)
             Core::Step();
 
+        if (digest)
+            digest->Add(Core::Frames(), page);
         Core::Consume(page);
         rendered += (uint64_t)page;
     }
@@ -143,7 +171,7 @@ int Run(double seconds, double warmup_seconds)
 
     /* Let the firmware boot and settle before the clock starts. */
     Core::PostReset(Core::Reset::GS);
-    Render((uint64_t)(warmup_seconds * rate), nullptr);
+    Render((uint64_t)(warmup_seconds * rate), nullptr, nullptr);
 
     const std::vector<Event> events = BuildSequence(seconds, rate);
 
@@ -151,6 +179,7 @@ int Run(double seconds, double warmup_seconds)
     const uint64_t chunk_frames = (uint64_t)rate; // report the worst second
     const int page_count = std::max(1, (int)(chunk_frames / (uint64_t)page));
 
+    Digest digest;
     size_t next_event = 0;
     uint64_t rendered = 0;
     double worst_ratio = 0.0;
@@ -171,6 +200,7 @@ int Run(double seconds, double warmup_seconds)
         while (Core::FramesReady() < (size_t)page)
             Core::Step();
 
+        digest.Add(Core::Frames(), page);
         Core::Consume(page);
         rendered += (uint64_t)page;
         chunk_rendered += (uint64_t)page;
@@ -202,6 +232,12 @@ int Run(double seconds, double warmup_seconds)
     printf("  realtime      %.3fx  (rendered seconds per wall-clock second)\n", ratio);
     if (have_worst)
         printf("  worst second  %.3fx\n", worst_ratio);
+    printf("  audio digest  %016llx%s\n", (unsigned long long)digest.value,
+           digest.silent ? "  (SILENT)" : "");
+    if (digest.silent)
+        printf("\n  warning: the run produced no audio at all, so the digest is the\n"
+               "           digest of silence and compares equal between any two builds.\n"
+               "           Do not use it to check a change to the emulator.\n");
     printf("\n");
     printf("  verdict       %s\n",
            (have_worst ? worst_ratio : ratio) >= 1.0

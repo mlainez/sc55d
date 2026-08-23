@@ -1,0 +1,72 @@
+mcu_timer: skip cycles on which no timer has a divider edge
+
+TIMER_Clock() steps once per two MCU cycles, which at 12 cycles per
+instruction means six iterations for every emulated instruction. Almost all
+of them do nothing: TIMER_ClockFrt() and TIMER_ClockTmr() both return
+immediately unless timer.cycles sits on their divider edge. Callgrind puts
+TIMER_Clock at 29% of all instructions retired in a 32-slot workload, ahead
+of PCM_Update.
+
+Compute the distance to the next edge across all four timers and jump there.
+Only cycles on which every timer would have returned early are skipped, so
+each timer passes through exactly the same sequence of states; nothing
+outside the function observes timer.cycles, and the MCU is not running while
+we are inside it, so intermediate values are unobservable.
+
+Measured +7% to +13% end to end on x86-64 against a synthetic 32-slot PCM
+load. Expected to help more on an in-order Cortex-A53, where retired
+instructions cost more.
+
+NOT VALIDATED AGAINST REAL AUDIO. The equivalence argument above is by
+construction and the author believes it sound, but the only workload
+available when this was written produced pure silence, so an output
+comparison proved nothing. Commit 8d6f67a in the core is a previous timer
+lookup-table optimisation that silently changed JV880 output, which is
+exactly this failure mode. Before trusting this patch, run `sc55d --bench`
+with real ROMs on builds with and without it and check that the audio
+digests match, on every romset you care about -- JV-880 especially.
+
+--- a/src/backend/mcu_timer.cpp
++++ b/src/backend/mcu_timer.cpp
+@@ -387,7 +387,40 @@
+ 
+         TIMER_ClockTmr(timer);
+ 
+-        ++timer.cycles;
++        // TIMER_ClockFrt() and TIMER_ClockTmr() both return immediately unless
++        // timer.cycles sits on their divider edge, and nothing outside this
++        // function observes timer.cycles -- the MCU is not running while we are
++        // in here. So skip straight to the next cycle at which some timer
++        // actually does something rather than visiting every cycle in between.
++        // At 12 MCU cycles per instruction this loop otherwise runs six times
++        // per emulated instruction, almost always to do nothing at all.
++        //
++        // Only cycles on which every timer would have returned early are
++        // skipped, so the sequence of states each timer passes through is
++        // unchanged. Note the tmr step mask of 0, which means "do not step" and
++        // must not be treated as an edge -- mishandling that is what commit
++        // 8d6f67a had to fix.
++        uint64_t step = ~(uint64_t)0;
++
++        for (int i = 0; i < 3; i++)
++        {
++            const uint64_t mask =
++                timer.frt_step_table[timer.frt[i].tcr & (FRT_TCR_CKS0 | FRT_TCR_CKS1)];
++            const uint64_t next = mask + 1 - (timer.cycles & mask);
++            if (next < step)
++                step = next;
++        }
++
++        const uint64_t tmr_mask =
++            timer.tmr_step_table[timer.tmr.tcr & (TMR_TCR_CKS0 | TMR_TCR_CKS1 | TMR_TCR_CKS2)];
++        if (tmr_mask != 0)
++        {
++            const uint64_t next = tmr_mask + 1 - (timer.cycles & tmr_mask);
++            if (next < step)
++                step = next;
++        }
++
++        timer.cycles += step ? step : 1;
+     }
+ }
+ 
