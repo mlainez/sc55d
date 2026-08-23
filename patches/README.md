@@ -48,7 +48,20 @@ too.
 
 | Patch | Effect | Status |
 |---|---|---|
-| `0001-mcu_timer-skip-cycles-with-no-divider-edge.patch` | `TIMER_Clock()` steps once per 2 MCU cycles — six iterations per emulated instruction, nearly all doing nothing. Jumps to the next divider edge instead. Callgrind put `TIMER_Clock` at 29% of retired instructions, ahead of `PCM_Update`. | +7–13% on a synthetic 32-slot load, x86-64. **Audio unvalidated.** |
+| `0001-mcu_timer-skip-cycles-with-no-divider-edge.patch` | `TIMER_Clock()` steps once per 2 MCU cycles — six iterations per emulated instruction, nearly all doing nothing. Jumps to the next divider edge instead. Callgrind put `TIMER_Clock` at 29% of retired instructions, ahead of `PCM_Update`. | +7–13% on a synthetic 32-slot load, x86-64. **Audio unvalidated** — needs the digest check below. |
+| `0002-rom_io-table-driven-unscramble.patch` | `unscramble()` rebuilds two fixed bit permutations a bit at a time for every byte — ~28 tests per byte over 2–3 MB of wave ROM. Precomputes them into 8.25 KiB of compile-time tables. | 5.1x faster startup, x86-64. **Equivalence proved exhaustively** (see below). |
+
+### Proof for 0002
+
+Unlike 0001, this one does not need ROMs to validate — both permutations are
+constants, so equivalence is decidable:
+
+```bash
+g++ -O2 -std=c++23 -o /tmp/ut patches/tests/unscramble_equivalence.cpp && /tmp/ut
+```
+
+It checks all 256 data bytes and all 8388608 addresses against the original
+loops. Both match exactly.
 
 ## Rejected
 

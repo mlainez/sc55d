@@ -258,6 +258,12 @@ your ROMs, and lists what was measured and rejected.
 check is easy. A digest marked `(SILENT)` means the run produced no audio and
 the comparison is meaningless.
 
+`docs/arm-optimization.md` covers the questions that come up next: whether NEON,
+the Pi's GPU, or an off-the-shelf ARM-optimised library can be pointed at any of
+this. Summary: not at the emulator, which is bit-exact hardware modelling rather
+than DSP — but yes at the resampler, which is a one-line `/etc/asound.conf`
+change to a NEON-backed converter.
+
 ### Where the time actually goes
 
 Callgrind, on a synthetic 32-slot PCM workload (no real ROMs — see the caveat
@@ -362,6 +368,8 @@ licence. Bugs reproducible on both belong upstream.
 ```
 CMakeLists.txt          one executable target, sc55d
 contrib/sc55d.service   systemd unit
+docs/                   design and optimisation notes
+patches/                core patches, applied at build time
 src/                    everything sc55d adds
 vendor/nuked-sc55/      the emulation core, unmodified (submodule)
 ```
