@@ -85,11 +85,29 @@ interrupt-handling work worth 10–16%.
 
 If a Pi 3 is a hard requirement, the answer is not to keep shaving the
 gate-level emulator. It is to move down the accuracy dial, exactly as mt32-pi
-did by using Munt. The SC-55 equivalent is
-[EmuSC](https://github.com/skjelten/emusc), which extracts the control and PCM
-ROM data and reimplements the synth's behaviour in modern C++ — Munt's approach
-applied to the Sound Canvas. It is less mature and targets the original SC-55
-rather than the mk2, so it is a real trade, not a free win.
+did by using Munt.
+
+**Munt itself is not an option.** It emulates Roland's LA synthesis — the
+MT-32, CM-32L, CM-64 and LAPC-I, all pre-General-MIDI. The SC-55 is a different
+machine entirely: a PCM ROMpler with its own sample set, effects and the GS
+dialect. Munt cannot load SC-55 ROMs, and there is no shared engine to port;
+adapting it would mean writing a Sound Canvas synthesiser from scratch.
+
+Somebody already did that: [EmuSC](https://github.com/skjelten/emusc) extracts
+the control and PCM ROM data and reimplements the synth's behaviour in modern
+C++ — Munt's approach applied to the Sound Canvas. It ships **libEmuSC** as a
+separate library, which would suit sc55d well, since only `src/core.cpp` is
+emulator-specific.
+
+The catch is accuracy. Its own README says there are "still some significant
+shortcomings in the generated audio, varying on which instruments and settings
+are being used", and points people at Nuked-SC55 or SC-55 SoundFonts for better
+results. So it is a real trade, not a free win.
+
+The third option is what mt32-pi does for everything that is not an MT-32:
+FluidSynth with an SC-55 SoundFont. Cheapest by far, entirely adequate for many
+uses, and not authentic — the samples are there but none of the module's voice
+handling or effects behaviour is.
 
 Worth noting: sc55d is structured so that this would be a contained change.
 Everything outside `src/core.cpp` — ALSA sequencer input, ALSA output, the
