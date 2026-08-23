@@ -107,6 +107,126 @@ used"*, and it points readers at Nuked-SC55 for the best available emulation.
 So this is a genuine trade — cheaper and legally freer, in exchange for a
 synth that does not yet sound exactly like the hardware.
 
+## Exactly what the gaps are
+
+Read out of `libemusc/src/` rather than inferred. They cluster tightly, and the
+cluster is informative: almost everything is *parameter interpretation*, not
+missing machinery. The synth structure is all there — `tva`, `tvf`, `pitch`,
+`partial`, `envelope`, `svf`, `chorus`, `reverb`, `wave_generator` — and what is
+missing is knowing precisely what the hardware does with each value.
+
+**Filter (tvf.cc)**
+- `TODO: Add support for Cutoff freq V-sens` — velocity sensitivity of the
+  cutoff frequency is simply not implemented.
+- `TODO: Add test for PD#4 on TVF envelopes` — an envelope phase is unverified.
+- Uncertainty about how the cutoff key-follow relates to time key-follow.
+
+**Amplitude envelope (tva.cc)**
+- `TODO: Move over to proper slew function for envelope output` — the envelope
+  output shaping is known to be an approximation.
+- `TODO: Rounding error has been observed` — a measured divergence from
+  hardware, not yet explained.
+- `TODO: Apply fade to dynamic volume if we are in portamento mode`.
+
+**Pitch (pitch.cc)**
+- `TODO: PORTAMENTO NOT COMPLETE!`
+- `TODO: Is there a pre-run of the envelope logic to find _deltaInc?` — an open
+  question about how the hardware initialises pitch envelopes.
+- `TODO: Verify if this is only supposed to happen on mk2 models` — a
+  model-specific behaviour guessed at.
+- Portamento/legato needs cross-note state (which keys are active, what
+  envelope phase each is in) that the current structure does not expose.
+
+**Samples (partial.cc)**
+- `FIXME: A few sample definitions in the SC-55 ROM have loop length > sample
+  length. This makes EmuSC crash as it loops outside range. The following hack
+  prevents a crash, but audio is wrong for these samples. TODO: Figure out why
+  this works on the real hardware.` With a worked example: Concert Cymbal, #59
+  of the Orchestra drumkit.
+
+**Voice allocation (synth.cc)**
+- `FIXME: Reduce voice count`, `TODO: Prioritize parts / MIDI channels` — voice
+  stealing does not match the hardware's rules.
+
+**Effects and settings** — `reverb.cc` notes the firmware fades out before
+starting in a way not reproduced; `settings.cc` carries a row of
+`TODO: Verify!` against parameter behaviour. SC-88's 32 parts are unsupported.
+
+Notice the shape of these. "Figure out why this works on the real hardware."
+"Is there a pre-run?" "Verify if this is only supposed to happen on mk2."
+"Rounding error has been observed." Every one is a question about observable
+behaviour, and the author knows exactly which question needs answering. That is
+a much healthier position than a vague "sounds wrong", and it means the work is
+tractable — given an oracle.
+
+The project also explicitly welcomes contributors interested in reverse
+engineering, so fixes are wanted rather than merely tolerated.
+
+## Fixing them by reading the Nuked source — do not do this
+
+This is the obvious idea and it is the one method that must be avoided.
+
+Nuked-SC55 is under the pre-2016 MAME licence: **non-commercial, and
+incompatible with the GPL family**. Transcribing its logic into libEmuSC makes
+libEmuSC a derivative work of non-commercially-licensed code. That would:
+
+- breach the MAME terms as soon as the result ships under LGPL;
+- **destroy the exact property that made libEmuSC attractive** — its LGPL
+  status, and with it any possibility of Spin42 selling anything built on it;
+- be rejected by the maintainer if disclosed, and be a landmine if it is not.
+
+Copyright covers expression, not facts. How the SC-55 hardware behaves is a
+fact. Nuked-SC55's particular C++ rendering of that behaviour is expression.
+The distinction is the whole game here.
+
+## The method that does work
+
+Use Nuked as an **oracle** and an **instrument**, never as a source to copy
+from.
+
+**1. Black-box A/B.** Render identical MIDI through both and compare audio.
+This localises divergence to specific instruments and settings — turning
+"sounds a bit off" into "the Orchestra drumkit's cymbal is wrong, here is the
+spectrum". Cheap to build: sc55d already renders deterministically and prints a
+digest, so it needs little more than a `--render-wav` option and a compare
+script. Useful to EmuSC upstream immediately, and it involves reading none of
+Nuked's source.
+
+**2. Instrumented tracing — the high-value one.** Nuked runs the real firmware.
+Modify a local build to log the PCM chip's per-voice register writes over time,
+and you get ground truth for exactly the open questions above: what cutoff the
+firmware programs for a given velocity, what envelope rates it loads per phase,
+what it does with a sample whose loop is longer than the sample. The trace is a
+record of what the ROM does — a fact — not a copy of how Nuked computes it.
+Modifying Nuked locally is permitted; only selling it is not.
+
+**3. Implement from observations, not from source.** Write down the observed
+behaviour, then implement libEmuSC's version from that write-up. If this ever
+matters commercially, keep the separation deliberate: whoever reads Nuked
+produces documentation, and whoever writes libEmuSC code works only from the
+documentation. That discipline is worth recording as it happens rather than
+reconstructing later.
+
+**A cleaner oracle still: real hardware.** A physical SC-55mk2 recorded against
+the same test sequences sidesteps the licence question entirely, and is the
+unimpeachable reference. If one is available it should be the primary source,
+with Nuked used for the internal state a real unit cannot expose.
+
+Not legal advice — if anything is ever sold on the back of this, it is worth a
+lawyer's half hour. But the engineering discipline is clear enough, and it is
+cheap to follow from the start and expensive to retrofit.
+
+## What fixing the gaps would actually cost
+
+- A/B tooling: **days**, and useful regardless of which backend wins.
+- Individual TODOs with trace data in hand: **days to weeks each**. The cymbal
+  loop question is probably an afternoon once you can see the address
+  generator's behaviour; portamento and voice-stealing are features, not fixes.
+- The whole list: **months**, and it is upstream's roadmap rather than ours.
+
+The realistic posture is to contribute the two or three fixes that matter for
+the material you care about, not to adopt the gap list.
+
 ## Using Nuked-SC55 as the reference — the strong version of this idea
 
 Here is where the work already done keeps its value even if the backend
