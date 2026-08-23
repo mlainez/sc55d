@@ -252,6 +252,17 @@ vendor/nuked-sc55/      the emulation core, unmodified (submodule)
 
 ## Licence
 
-sc55d is under this repository's licence. The emulation core in
-`vendor/nuked-sc55` keeps its own licence, which is **not** a
-commercial-use licence — see `vendor/nuked-sc55/LICENSE`.
+The emulation core in `vendor/nuked-sc55` is under the **original (pre-2016)
+MAME licence**, which is not an open-source licence: redistribution is allowed,
+but **not selling it and not using it in a commercial product or activity**, any
+modified binary must ship complete source, and the copyright notice and
+conditions must be reproduced with the distribution. See
+`vendor/nuked-sc55/LICENSE`.
+
+Those terms cover anything built from this repository, because sc55d is useless
+without the core. That also makes the combination GPL-incompatible — the GPL
+does not allow the extra non-commercial restriction — so sc55d cannot be merged
+into a GPL project such as mt32-pi.
+
+No ROM data is included or downloaded. The SC-55 ROMs are Roland's copyright and
+have to come from your own hardware.
