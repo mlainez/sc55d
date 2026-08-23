@@ -213,18 +213,43 @@ tables: 5.1x faster startup, proved exhaustively over all 256 data bytes and all
 8388608 addresses by `patches/tests/unscramble_equivalence.cpp`. No library
 needed — just noticing that a constant permutation can be precomputed.
 
+## The biggest remaining target
+
+After `patches/0001`, `TIMER_Clock` is *still* the largest single function in
+the profile — about 30% of retired instructions. That is not waste any more; it
+is real work. With the common /4 divider the three free-running timers each tick
+every 8 MCU cycles, so with 12 cycles per instruction they genuinely advance
+about 1.5 times per emulated instruction, and each tick compares `frc` against
+`ocra` and `ocrb`, increments, sets flags and tests interrupt enables.
+
+The way out is **closed-form advancement**. Between observable events a
+free-running counter just increments, so instead of stepping it one tick at a
+time the core could compute the distance to the next event —
+`min((ocra - frc) mod 65536, (ocrb - frc) mod 65536, 0x10000 - frc)` per timer —
+take the earliest across all four, and add. Events are thousands of ticks apart;
+the loop would run a handful of times per second instead of ~40 million.
+
+That is plausibly a **~25% overall win**, the largest left on the table. It is
+also a real rewrite of the timer's state machine rather than a 25-line skip, and
+it has to reproduce the flag and interrupt-request behaviour exactly. It should
+be built the same way 0001 was: a differential harness that drives a modelled
+and a real timer side by side over random register programming, checking full
+state after every call.
+
 ## Where the effort actually belongs
 
 Ranked by measured evidence rather than novelty:
 
 1. **Build flags** — `-mcpu`, LTO, PGO. Free, and PGO in particular suits a
    dispatch-table interpreter. See the README.
-2. **`patches/0001`** — `TIMER_Clock` edge skipping, 7–13%, 25 lines. Still
-   needs real-ROM validation.
+2. **`patches/0001`** — `TIMER_Clock` edge skipping, +11%. Proved by
+   differential test; still needs real-ROM validation.
 3. **Romset choice** — `scb55` has no sub-MCU, deleting 12% of the workload
    outright with no patch at all.
 4. **`patches/0002`** — startup, done and proved.
-5. **Re-profile on the target with real ROMs.** Everything above was measured on
+5. **Closed-form timer advancement** — see above, ~25%, the biggest remaining
+   item and the only one that needs real design work.
+6. **Re-profile on the target with real ROMs.** Everything above was measured on
    x86-64 with placeholder ROMs, which under-represents the MCU interpreter. The
    ranking could change; `--bench` and callgrind are all it takes.
 

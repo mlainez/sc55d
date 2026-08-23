@@ -1,0 +1,102 @@
+mcu_timer: skip cycles on which no timer can do anything
+
+TIMER_Clock() advances timer.cycles one at a time, and at 12 MCU cycles per
+emulated instruction that is six iterations per instruction. Almost all of
+them do nothing: TIMER_ClockFrt() and TIMER_ClockTmr() both return
+immediately unless timer.cycles sits on their divider edge. Callgrind put
+TIMER_Clock at 29% of retired instructions on a 32-slot workload, ahead of
+PCM_Update.
+
+Every entry in both step tables is 2^k - 1, so every divider period is a
+power of two and the smallest divides all the others. The set of cycles on
+which any timer fires is therefore exactly the multiples of the smallest
+period: no search is needed, just step to the next multiple. tcr is only
+written by TIMER_Write(), which the MCU cannot reach while we are inside this
+function, so the periods are computed once per call rather than per iteration.
+
+Two things this patch is careful about, both learned the hard way:
+
+  - A tmr step mask of 0 means "never step" and must not be counted as an
+    edge. Mishandling exactly that is what commit 8d6f67a had to fix.
+
+  - The loop must stop on the same cycle the original did, not on the next
+    multiple of the period. timer.cycles persists across calls, and the
+    skipped cycles are only known to be uneventful under the divider settings
+    in force right now -- if the MCU programs a finer divider before the next
+    call, cycles we ran past would have become live ones. An earlier draft
+    overshot and was wrong in precisely that way.
+
+Measured on x86-64 against a synthetic 32-slot PCM load: +11% end to end,
+with TIMER_Clock's retired instruction count falling from 2295M to 2142M.
+That second number is the one that matters for a Pi: an earlier draft that
+computed the step per iteration was 10% faster in wall-clock terms on x86
+while retiring *more* instructions than the original, which an in-order
+Cortex-A53 would very likely have run slower.
+
+patches/tests/timer_step_equivalence.cpp models the loop and checks all 1024
+divider configurations over 9.3M cases, comparing both the set of cycles the
+timers are clocked on and the final timer.cycles. No ROMs needed. It rejects
+the overshooting draft, so it is known to be capable of failing.
+
+Still worth confirming against real ROM audio before trusting it in
+production; see patches/README.md.
+
+--- a/src/backend/mcu_timer.cpp
++++ b/src/backend/mcu_timer.cpp
+@@ -378,7 +378,44 @@
+ 
+ void TIMER_Clock(mcu_timer_t& timer, uint64_t cycles)
+ {
+-    while (timer.cycles * 2 < cycles) // FIXME
++    // TIMER_ClockFrt() and TIMER_ClockTmr() both return immediately unless
++    // timer.cycles sits on their divider edge, so most of the iterations below
++    // do nothing at all. At 12 MCU cycles per instruction this loop runs six
++    // times per emulated instruction; skipping the empty ones is most of the
++    // work this function does.
++    //
++    // Every entry in both step tables is 2^k - 1, so every divider period is a
++    // power of two and the smallest one divides all the others. The set of
++    // cycles on which any timer fires is therefore exactly the multiples of the
++    // smallest period -- no per-iteration search needed, just step to the next
++    // multiple of it.
++    //
++    // A tmr step mask of 0 means "never step" and must not be mistaken for an
++    // edge; mishandling that is what commit 8d6f67a had to fix.
++    uint64_t period = ~(uint64_t)0;
++
++    for (int i = 0; i < 3; i++)
++    {
++        const uint64_t mask =
++            timer.frt_step_table[timer.frt[i].tcr & (FRT_TCR_CKS0 | FRT_TCR_CKS1)];
++        if (mask + 1 < period)
++            period = mask + 1;
++    }
++
++    const uint64_t tmr_mask =
++        timer.tmr_step_table[timer.tmr.tcr & (TMR_TCR_CKS0 | TMR_TCR_CKS1 | TMR_TCR_CKS2)];
++    if (tmr_mask != 0 && tmr_mask + 1 < period)
++        period = tmr_mask + 1;
++
++    // First cycle count at which the original loop would have stopped. We must
++    // land on exactly this value and no further: the skipped cycles are only
++    // known to be uneventful under the divider settings in force right now, and
++    // if the MCU programs a finer divider before the next call, cycles we ran
++    // past would have become live ones. Overshooting here is a real, if narrow,
++    // behavioural change.
++    const uint64_t limit = (cycles + 1) / 2;
++
++    while (timer.cycles < limit)
+     {
+         for (int i = 0; i < 3; i++)
+         {
+@@ -387,7 +424,9 @@
+ 
+         TIMER_ClockTmr(timer);
+ 
+-        ++timer.cycles;
++        // Next multiple of period, which is period away when already aligned.
++        const uint64_t next = timer.cycles + period - (timer.cycles & (period - 1));
++        timer.cycles = next < limit ? next : limit;
+     }
+ }
+ 

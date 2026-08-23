@@ -48,20 +48,49 @@ too.
 
 | Patch | Effect | Status |
 |---|---|---|
-| `0001-mcu_timer-skip-cycles-with-no-divider-edge.patch` | `TIMER_Clock()` steps once per 2 MCU cycles — six iterations per emulated instruction, nearly all doing nothing. Jumps to the next divider edge instead. Callgrind put `TIMER_Clock` at 29% of retired instructions, ahead of `PCM_Update`. | +7–13% on a synthetic 32-slot load, x86-64. **Audio unvalidated** — needs the digest check below. |
-| `0002-rom_io-table-driven-unscramble.patch` | `unscramble()` rebuilds two fixed bit permutations a bit at a time for every byte — ~28 tests per byte over 2–3 MB of wave ROM. Precomputes them into 8.25 KiB of compile-time tables. | 5.1x faster startup, x86-64. **Equivalence proved exhaustively** (see below). |
+| `0001-mcu_timer-skip-uneventful-cycles.patch` | `TIMER_Clock()` steps one cycle at a time — six iterations per emulated instruction, most doing nothing. Steps to the next divider edge instead. | +11% end to end; `TIMER_Clock` 2295M → 2142M instructions. **Proved by differential test; real-ROM audio still unchecked.** |
+| `0002-rom_io-table-driven-unscramble.patch` | `unscramble()` rebuilds two fixed bit permutations a bit at a time per byte — ~28 tests over 2–3 MB of wave ROM. Precomputes 8.25 KiB of compile-time tables. | 5.1x faster startup. **Equivalence proved exhaustively.** |
 
-### Proof for 0002
+### Proofs
 
-Unlike 0001, this one does not need ROMs to validate — both permutations are
-constants, so equivalence is decidable:
+Both patches have ROM-free tests under `tests/`, because both transformations
+are decidable without any audio:
 
 ```bash
 g++ -O2 -std=c++23 -o /tmp/ut patches/tests/unscramble_equivalence.cpp && /tmp/ut
+g++ -O2 -std=c++17 -o /tmp/tt patches/tests/timer_step_equivalence.cpp && /tmp/tt
 ```
 
-It checks all 256 data bytes and all 8388608 addresses against the original
-loops. Both match exactly.
+- `unscramble_equivalence` checks all 256 data bytes and all 8388608 addresses.
+- `timer_step_equivalence` checks all 1024 divider configurations over 9.3M loop
+  cases, comparing both the set of cycles the timers are clocked on *and* the
+  final `timer.cycles`. It is known to be capable of failing: it rejects an
+  earlier draft of 0001 that overshot the loop bound.
+
+These prove the transformations, not the emulation. Run the digest comparison
+above with real ROMs before trusting either in production.
+
+### Two mistakes worth not repeating
+
+Both were caught by measuring rather than reasoning, and both are the reason
+this directory has tests in it.
+
+**Wall-clock is the wrong metric for a Pi.** The first draft of 0001 computed
+the skip distance per iteration. On x86-64 it was ~10% faster — but it retired
+*more* instructions than the unpatched core (2527M vs 2295M), because
+out-of-order execution hid the extra arithmetic while the removed iterations
+were branchy. On an in-order Cortex-A53 that would very likely have been a
+regression. Hoisting the computation out of the loop, which is valid because
+every divider period is a power of two and the smallest divides all the others,
+made it faster on both metrics. **Check retired instructions, not just seconds.**
+
+**Skipping work is not the same as skipping time.** The same draft advanced
+`timer.cycles` to the next divider edge even when that overshot the point the
+original loop would have stopped at. The cycles skipped are only uneventful
+under the divider settings in force at that moment; `timer.cycles` persists
+across calls, so if the MCU then programmed a finer divider, cycles that were
+run past would have become live ones. The fix is to clamp to the original exit
+point.
 
 ## Rejected
 
