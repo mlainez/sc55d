@@ -1,0 +1,36 @@
+[Unit]
+Description=Roland SC-55 emulator (Nuked-SC55, headless)
+Documentation=https://github.com/nukeykt/Nuked-SC55
+After=sound.target
+Wants=sound.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/sc55d --roms /usr/share/sc55d/roms --audio-device default --period-frames 256 --periods 3 --cpu 3
+Restart=always
+RestartSec=2
+
+# SCHED_FIFO on the render thread and mlockall(). Drop these two limits (and
+# pass --no-realtime) if the unit should run unprivileged.
+LimitRTPRIO=80
+LimitMEMLOCK=infinity
+
+# The daemon needs the ALSA character devices and nothing else.
+User=sc55d
+Group=audio
+SupplementaryGroups=audio
+DeviceAllow=char-alsa rw
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+RestrictAddressFamilies=AF_UNIX
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
