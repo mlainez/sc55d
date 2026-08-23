@@ -1,3 +1,3 @@
 [submodule "vendor/nuked-sc55"]
 	path = vendor/nuked-sc55
-	url = https://github.com/nukeykt/Nuked-SC55
+	url = https://github.com/jcmoyer/Nuked-SC55

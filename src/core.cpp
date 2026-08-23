@@ -1,53 +1,158 @@
+/*
+ * Thin wrapper over the Nuked-SC55 backend library.
+ *
+ * The core pushes finished stereo frames through a sample callback; we clamp
+ * them to 16-bit and append them to a small linear buffer that the render loop
+ * hands straight to ALSA.  Because the loop only steps until one period is
+ * ready, and a single instruction can yield at most two frames, the buffer
+ * never holds much more than a period -- so there is no ring, no wrap handling
+ * and no copy between here and snd_pcm_writei().
+ */
 #include "core.h"
 
 #include <cstdio>
+#include <cstring>
+#include <span>
+#include <vector>
 
-#include "mcu_interrupt.h"
-#include "mcu_timer.h"
+#include "audio.h"
+#include "diagnostics.h"
+#include "emu.h"
 #include "pcm.h"
-#include "sdl_compat.h"
-#include "stubs.h"
-#include "submcu.h"
+#include "rom_loader.h"
 
 namespace Core {
 namespace {
 
+Emulator g_emu;
+
+/* Holds the ROM images the emulator was handed: LoadRoms() does not promise to
+ * copy them, so this has to outlive g_emu. */
+common::LoadRomsetResult g_romset;
+bool g_have_romset = false;
+
+unsigned long g_diag_limit = 0;
+unsigned long g_diag_seen = 0;
+unsigned long g_diag_suppressed = 0;
+
+/* The core logs from whichever thread is inside it, which for sc55d is only
+ * ever the render thread. */
+void DiagCallback(Diag_Category category, std::string_view message)
+{
+    if (g_diag_limit && g_diag_seen >= g_diag_limit)
+    {
+        g_diag_suppressed++;
+        return;
+    }
+
+    g_diag_seen++;
+    fprintf(stderr, "sc55d: core: %s: %.*s\n", ToCString(category),
+            (int)message.size(), message.data());
+
+    if (g_diag_limit && g_diag_seen == g_diag_limit)
+        fprintf(stderr, "sc55d: core: further messages suppressed "
+                        "(raise --core-log-limit to see them)\n");
+}
+
 int g_page_frames = 0;
-uint64_t g_produced = 0;
-uint64_t g_consumed = 0;
+std::vector<int16_t> g_buffer;
+size_t g_frames = 0;
+unsigned long g_overruns = 0;
+
+void SampleCallback(void * /*userdata*/, const AudioFrame<int32_t> &frame)
+{
+    if (g_frames * 2 + 2 > g_buffer.size())
+    {
+        g_overruns++;
+        return;
+    }
+
+    AudioFrame<int16_t> out;
+    Normalize(frame, out);
+    g_buffer[g_frames * 2 + 0] = out.left;
+    g_buffer[g_frames * 2 + 1] = out.right;
+    g_frames++;
+}
 
 } // namespace
 
-bool Start(int page_frames, int pages)
+void SetDiagnostics(unsigned long limit, bool quiet)
 {
-    g_page_frames = page_frames;
-    g_produced = 0;
-    g_consumed = 0;
+    g_diag_limit = limit;
+    Diag_SetCallback(quiet ? nullptr : DiagCallback);
+}
 
-    /* MCU_OpenAudio() takes a page size in int16_t samples: one page is one
-     * callback's worth, i.e. page_frames stereo frames.  It picks the native
-     * sample rate for the loaded romset and hands the callback to our SDL
-     * shim, which is where PullPage() gets it from. */
-    if (!MCU_OpenAudio(0, page_frames * 4, pages))
+unsigned long SuppressedMessages()
+{
+    return g_diag_suppressed;
+}
+
+bool Load(const std::string &rom_dir, const std::string &model, bool verify)
+{
+    const common::RomOverrides overrides{};
+    const common::RomLoader loader =
+        verify ? common::RomLoader::Hashing : common::RomLoader::Legacy;
+
+    const common::LoadRomsetError error =
+        common::LoadRomset(rom_dir, model, loader, overrides, g_romset);
+
+    common::PrintLoadRomsetDiagnostics(stderr, error, g_romset);
+
+    if (error != common::LoadRomsetError{})
+    {
+        fprintf(stderr,
+                "sc55d: no usable ROM set in %s.\n"
+                "sc55d: put the Nuked-SC55 ROM files there, or pass --roms <dir>.\n"
+                "sc55d: --list-models shows the sets the core knows about, and\n"
+                "       --no-verify-roms falls back to matching by file name.\n",
+                rom_dir.c_str());
         return false;
+    }
 
-    MCU_Init();
-    MCU_PatchROM();
-    MCU_Reset();
-    SM_Reset();
-    PCM_Reset();
+    g_have_romset = true;
     return true;
 }
 
-void Stop()
+bool Start(int page_frames)
 {
-    MCU_CloseAudio();
+    if (!g_have_romset)
+        return false;
+
+    g_page_frames = page_frames;
+
+    /* One instruction can emit two frames when the core is oversampling, so a
+     * period plus a little slack is all the headroom the buffer needs. */
+    g_buffer.assign((size_t)(page_frames + 8) * 2, 0);
+    g_frames = 0;
+
+    EMU_Options options;
+    options.lcd_backend = nullptr; // headless: no LCD emulation at all
+
+    if (!g_emu.Init(options))
+    {
+        fprintf(stderr, "sc55d: cannot initialise the emulator\n");
+        return false;
+    }
+
+    if (!g_emu.LoadRoms(g_romset.romset, g_romset.romset_info))
+    {
+        fprintf(stderr, "sc55d: the emulator rejected the ROM set\n");
+        return false;
+    }
+
+    g_emu.Reset();
+    g_emu.SetSampleCallback(SampleCallback, nullptr);
+    return true;
+}
+
+const char *ModelName()
+{
+    return g_have_romset ? RomsetName(g_romset.romset) : "none";
 }
 
 int SampleRate()
 {
-    const SDL_AudioSpec *spec = SdlCompat::OpenedSpec();
-    return spec ? spec->freq : 0;
+    return (int)PCM_GetOutputFrequency(g_emu.GetPCM());
 }
 
 int PageFrames()
@@ -57,74 +162,59 @@ int PageFrames()
 
 void Step()
 {
-    if (!mcu.ex_ignore)
-        MCU_Interrupt_Handle();
-    else
-        mcu.ex_ignore = 0;
-
-    if (!mcu.sleep)
-        MCU_ReadInstruction();
-
-    mcu.cycles += 12; // FIXME: assume 12 cycles per instruction (as upstream)
-
-    /* PCM_Update() posts one frame per tick, or two when the oversampling bit
-     * is set.  A tick spans at least 50 MCU cycles and we call this after every
-     * instruction, so at most one tick can fall out of a single call -- which
-     * is how we count frames without reaching into mcu.cpp's private ring. */
-    const uint64_t pcm_cycles = pcm.cycles;
-    const int frames_per_tick = (pcm.config_reg_3c & 0x40) ? 2 : 1;
-    PCM_Update(mcu.cycles);
-    if (pcm.cycles != pcm_cycles)
-        g_produced += frames_per_tick;
-
-    TIMER_Clock(mcu.cycles);
-
-    if (!mcu_mk1 && !mcu_jv880 && !mcu_scb55)
-    {
-        SM_Update(mcu.cycles);
-    }
-    else
-    {
-        MCU_UpdateUART_RX();
-        MCU_UpdateUART_TX();
-    }
-
-    MCU_UpdateAnalog(mcu.cycles);
-
-    if (mcu_mk1)
-        LcdStub_Tick();
+    g_emu.Step();
 }
 
-uint64_t FramesReady()
+size_t FramesReady()
 {
-    return g_produced - g_consumed;
+    return g_frames;
 }
 
-void PullPage(int16_t *dst)
+const int16_t *Frames()
 {
-    SdlCompat::PullFrames(dst, g_page_frames);
-    g_consumed += (uint64_t)g_page_frames;
+    return g_buffer.data();
 }
 
-/* Called from the MIDI thread while the render thread reads the same FIFO.
- * The core's uart_buffer is a plain single-producer ring with unsynchronised
- * indices; upstream's RtMidi callback posts into it the same way. */
+void Consume(int frames)
+{
+    const size_t taken = (size_t)frames;
+    const size_t left = g_frames - taken;
+    if (left)
+        memmove(g_buffer.data(), g_buffer.data() + taken * 2, left * 2 * sizeof(int16_t));
+    g_frames = left;
+}
+
+/* Called from the MIDI thread while the render thread runs the core.  The
+ * backend's MIDI FIFO takes the same unsynchronised posting upstream's RtMidi
+ * callback does. */
 void PostMidi(const uint8_t *data, size_t length)
 {
-    for (size_t i = 0; i < length; i++)
-        MCU_PostUART(data[i]);
+    g_emu.PostMIDI(std::span<const uint8_t>(data, length));
 }
 
 void PostReset(Reset type)
 {
-    static const uint8_t gm_reset[] = { 0xf0, 0x7e, 0x7f, 0x09, 0x01, 0xf7 };
-    static const uint8_t gs_reset[] = { 0xf0, 0x41, 0x10, 0x42, 0x12, 0x40,
-                                        0x00, 0x7f, 0x00, 0x41, 0xf7 };
+    switch (type)
+    {
+        case Reset::GM:
+            g_emu.PostSystemReset(EMU_SystemReset::GM_RESET);
+            break;
+        case Reset::GS:
+            g_emu.PostSystemReset(EMU_SystemReset::GS_RESET);
+            break;
+        case Reset::None:
+            break;
+    }
+}
 
-    if (type == Reset::GM)
-        PostMidi(gm_reset, sizeof(gm_reset));
-    else if (type == Reset::GS)
-        PostMidi(gs_reset, sizeof(gs_reset));
+unsigned long Overruns()
+{
+    return g_overruns;
+}
+
+void PrintModels()
+{
+    common::PrintRomsets(stdout);
 }
 
 } // namespace Core

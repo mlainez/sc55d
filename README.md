@@ -1,12 +1,14 @@
 # sc55d
 
 A headless Linux frontend for the [Nuked-SC55](https://github.com/nukeykt/Nuked-SC55)
-Roland SC-55 emulation core, aimed at a Raspberry Pi 4 running Raspberry Pi OS
-Lite (aarch64). MIDI arrives over the ALSA sequencer, audio leaves over ALSA,
-and there is no GUI, no SDL and no JACK — the only dependency is `libasound`.
+Roland SC-55 emulation core, aimed at a Raspberry Pi 4 (and, with tuning, a
+Pi 3) running Raspberry Pi OS Lite. MIDI arrives over the ALSA sequencer, audio
+leaves over ALSA, and there is no GUI, no SDL and no JACK — the only dependency
+is `libasound`.
 
-The emulation core is built straight from the `vendor/nuked-sc55` submodule and
-is never patched; everything sc55d needs on top of it lives in `src/`.
+The core is built from the [jcmoyer fork](https://github.com/jcmoyer/Nuked-SC55)
+in `vendor/nuked-sc55`, which packages the emulator as a library with no SDL
+dependency. Nothing in the submodule is patched.
 
 ## Building
 
@@ -16,9 +18,12 @@ Raspberry Pi OS Lite:
 sudo apt install build-essential cmake git libasound2-dev
 git clone --recurse-submodules <this repo>
 cd sc55d
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSC55D_CPU=cortex-a72
 cmake --build build -j4
 ```
+
+Use `-DSC55D_CPU=cortex-a53` on a Pi 3, `cortex-a76` on a Pi 5. The core needs a
+C++23 compiler; GCC 12 (Bookworm) is enough.
 
 If the tree was cloned without `--recurse-submodules`:
 
@@ -26,33 +31,25 @@ If the tree was cloned without `--recurse-submodules`:
 git submodule update --init --recursive
 ```
 
-On a Pi 4 it is worth telling the compiler what it is building for:
+`-DNUKED_DIR=/path/to/checkout` builds against a core checkout somewhere else
+instead of the submodule.
 
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_CXX_FLAGS="-mcpu=cortex-a72 -mtune=cortex-a72"
-```
+Read [Performance](#performance) before deploying — the build flags are worth
+more than anything else you can do, especially on a Pi 3.
 
 ## ROMs
 
-sc55d ships no ROM data. Put the ROM files in a directory of your own and point
-`--roms` at it; the file names are upstream's:
+sc55d ships no ROM data. Put the ROM files in a directory and point `--roms` at
+it. By default they are identified by **SHA-256 content hash**, so file names do
+not matter and a corrupt or wrong-revision dump is caught at startup rather than
+becoming mysterious noise later. `--no-verify-roms` falls back to matching
+upstream's file names.
 
-| Model (`--model`) | Files |
-|---|---|
-| `mk2` (default)   | `rom1.bin` `rom2.bin` `waverom1.bin` `waverom2.bin` `rom_sm.bin` |
-| `st`              | `rom1.bin` `rom2_st.bin` `waverom1.bin` `waverom2.bin` `rom_sm.bin` |
-| `mk1`             | `sc55_rom1.bin` `sc55_rom2.bin` `sc55_waverom1.bin` `sc55_waverom2.bin` `sc55_waverom3.bin` |
-| `cm300`           | `cm300_rom1.bin` `cm300_rom2.bin` `cm300_waverom1.bin` `cm300_waverom2.bin` `cm300_waverom3.bin` |
-| `jv880`           | `jv880_rom1.bin` `jv880_rom2.bin` `jv880_waverom1.bin` `jv880_waverom2.bin` (+ optional expansion/PCM card) |
-| `scb55`           | `scb55_rom1.bin` `scb55_rom2.bin` `scb55_waverom1.bin` `scb55_waverom2.bin` |
-| `rlp3237`         | `rlp3237_rom1.bin` `rlp3237_rom2.bin` `rlp3237_waverom1.bin` |
-| `sc155`           | `sc155_rom1.bin` `sc155_rom2.bin` `sc155_waverom1.bin` `sc155_waverom2.bin` `sc155_waverom3.bin` |
-| `sc155mk2`        | same names as `mk2` |
+`--list-models` prints every set the core recognises — `mk2`, `st`, `mk1`,
+`cm300`, `jv880`, `scb55`, `rlp3237`, `sc155`, `sc155mk2`, plus specific
+revisions such as `mk2-v1.01`. Without `--model` the loader autodetects.
 
-Without `--model`, sc55d runs upstream's autodetect: the first complete set in
-that order wins, so an SC-55mk2 set is picked up on its own. With no ROMs at all
-it prints the expected file names and exits.
+With no usable ROMs, sc55d says what it found and exits non-zero.
 
 ## Running
 
@@ -61,23 +58,25 @@ it prints the expected file names and exits.
 ```
 
 The core renders at its native rate — 66207 Hz for the SC-55mk2 family, 64000 Hz
-for the mk1 and JV-880. sc55d opens the ALSA device at that rate through the
-plug layer and lets ALSA resample to whatever the hardware does; use
-`--audio-device` to pick something other than `default` (`aplay -L` lists them).
+for the mk1 and JV-880, halved again when the emulated machine turns
+oversampling off. sc55d opens the ALSA device at that rate through the plug
+layer and lets ALSA resample; `--audio-device` picks something other than
+`default` (`aplay -L` lists them).
 
 Latency is `--period-frames` × `--periods`; the defaults (256 × 3) are about
-11.6 ms at 66207 Hz. Raise `--periods` if the log shows xruns — every xrun is
+11.6 ms at 66207 Hz. Raise `--periods` if the log shows xruns — each one is
 reported as it happens and the total is printed at shutdown.
 
-`--cpu <n>` pins the render thread to one core, which on a four-core Pi 4 keeps
-it off whatever else is running. sc55d also calls `mlockall()` and asks for
-`SCHED_FIFO` (priority 70 by default, `--priority` to change). Both are best
-effort: without the privileges it warns and carries on. `--no-realtime` skips
-them entirely.
+`--cpu <n>` pins the render thread to one core. sc55d also calls `mlockall()`
+and asks for `SCHED_FIFO` (priority 70, `--priority` to change); both are best
+effort and warn rather than fail without privileges. `--no-realtime` skips them.
 
-`SIGINT` and `SIGTERM` shut it down cleanly.
+The emulator's own log messages are capped at 100 (`--core-log-limit`, 0 for no
+cap) and `--quiet-core` silences them. This is not cosmetic: a ROM the core is
+unhappy with can emit millions of messages per second, and on a real device that
+flood alone will cause xruns.
 
-Full option list: `sc55d --help`.
+`SIGINT`/`SIGTERM` shut it down cleanly. Full options: `sc55d --help`.
 
 ### MIDI in
 
@@ -142,17 +141,19 @@ running at MIDI baud, and something bridging the tty to the ALSA sequencer.
    aconnect 'ttymidi':0 'sc55d':0
    ```
 
+
 ### Benchmark
 
-`--bench` is the go/no-go number for a given board: it loads the ROMs, feeds a
-dense sixteen-part sequence generated in code (no external file), renders 30
-seconds of audio as fast as the machine allows, throws the samples away, and
-reports how many seconds of audio it produced per wall-clock second.
+`--bench` is the go/no-go number for a board: it loads the ROMs, feeds a dense
+sixteen-part sequence generated in code (no external file), renders 30 seconds
+of audio as fast as the machine allows, discards the samples, and reports how
+many seconds of audio it produced per wall-clock second.
 
 ```bash
-$ ./build/sc55d --roms /usr/share/sc55d/roms --bench
-sc55d: benchmark: 30 s of audio at 66207 Hz (after 1 s of warm-up), output discarded
+./build/sc55d --roms /usr/share/sc55d/roms --bench
+```
 
+```
   rendered      30.00 s of audio (1986210 frames at 66207 Hz)
   wall clock    ...
   realtime      ...x  (rendered seconds per wall-clock second)
@@ -162,12 +163,96 @@ sc55d: benchmark: 30 s of audio at 66207 Hz (after 1 s of warm-up), output disca
 ```
 
 A one-second warm-up (firmware boot plus a GS reset) runs before the clock
-starts. `worst second` is the lowest ratio over any one second of the run and is
-the number that matters — the average can hide a stall that would be an xrun in
-real use. Anything at or above 1.0x holds realtime; the exit status is 0 when it
-does and 1 when it does not. `--bench-seconds` changes the length.
+starts. **`worst second` is the number that matters** — the lowest ratio over
+any one second of the run. The average can hide a stall that would be an xrun in
+real use. At or above 1.0x holds realtime; the exit status is 0 when it does and
+1 when it does not.
 
-Run it the way the daemon will run: same `--cpu`, same privileges.
+Run it the way the daemon will run: same `--cpu`, same `--model`, same
+privileges. And compare like with like — the ratio moves several-fold with build
+flags, so re-benchmark after changing them.
+
+## Performance
+
+The core is an interpreter running a cycle-level model of two CPUs and a PCM
+chip. It is one serial dependency chain, so it lives or dies on single-core
+throughput and memory latency. In rough order of how much they buy you:
+
+### Build flags
+
+| Flag | Why |
+|---|---|
+| `-DSC55D_CPU=cortex-a53` / `cortex-a72` | Gives the compiler the real pipeline model. Worth most on the **Pi 3**, whose Cortex-A53 is *in-order* — it cannot hide a badly scheduled load the way the Pi 4's out-of-order A72 does. |
+| `-DSC55D_LTO=ON` (default) | Lets the PCM, MCU and sc55d translation units inline into each other. The render loop calls across all three per emulated instruction. |
+| `-DSC55D_PGO=generate` → `use` | Biggest single win for an interpreter. The opcode dispatch is one enormous indirect branch; profile data lets the compiler lay out the hot handlers together and predict the branches. |
+| 64-bit OS | The core counts cycles in `uint64_t` everywhere. A 32-bit armhf userland pays for every one of those. The Pi 3 is aarch64-capable — use the 64-bit image. |
+
+The PGO cycle, using the benchmark as the training run:
+
+```bash
+cmake -S . -B build-pgo -DCMAKE_BUILD_TYPE=Release \
+      -DSC55D_CPU=cortex-a53 -DSC55D_PGO=generate
+cmake --build build-pgo -j4
+./build-pgo/sc55d --roms /usr/share/sc55d/roms --bench --bench-seconds 30
+
+cmake -S . -B build-pgo -DSC55D_PGO=use
+cmake --build build-pgo -j4
+```
+
+Train on the model you will actually run — the profile bakes in which code paths
+matter, and mk2 and mk1 take different ones.
+
+### Pick a cheaper machine
+
+Not every SC-55 costs the same to emulate, and the differences are large:
+
+- **`--model scb55` (or `rlp3237`) has no sub-MCU.** On an mk2 the core emulates
+  a *second* CPU, stepping it after every instruction of the first. The SCB-55
+  is the same sound engine on a card with no front panel, so that whole second
+  interpreter collapses into cheap UART polling. On a Pi 3 this is likely the
+  difference between working and not.
+- **`--model mk1` and `jv880` run at 64000 Hz** rather than 66207 Hz — about
+  3.3% fewer samples to produce, and the mk1 also has no sub-MCU.
+- sc55d installs **no LCD backend**, so the core skips LCD emulation entirely.
+  Nothing to configure; it is simply work the desktop frontend does and we do not.
+
+### System tuning
+
+```bash
+# CPU governor: ondemand ramps, and the ramp is an xrun
+echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+
+# /boot/firmware/cmdline.txt — hand core 3 to sc55d alone, keep IRQs off it
+isolcpus=3 nohz_full=3 rcu_nocbs=3 irqaffinity=0-2
+# then run with --cpu 3
+```
+
+- **ALSA resampling is not free.** 66207 Hz is not a rate any card supports, so
+  the plug layer converts every sample. The default converter can be one of the
+  Speex ones; `linear` costs a fraction of that:
+
+  ```
+  # /etc/asound.conf
+  defaults.pcm.rate_converter "linear"
+  ```
+
+- **Avoid the 3.5 mm jack.** It is PWM-driven, sounds poor, and adds work. An
+  I²S DAC HAT or a USB DAC is better on both counts.
+- **Trade latency for safety on a Pi 3.** `--period-frames 512 --periods 4` is
+  about 31 ms and far harder to starve than the 11.6 ms default.
+- **Watch thermals.** A Pi 3B+ throttles without a heatsink; check
+  `vcgencmd get_throttled`.
+- Bluetooth is already disabled if you followed the serial MIDI setup; also turn
+  off Wi-Fi power saving if the box is headless and wired.
+
+### Known ceiling
+
+sc55d renders and writes on one thread, so the ALSA buffer is the only slack: a
+scheduling hiccup longer than the buffer is an xrun even when the average ratio
+is comfortable. If `--bench` says a board is near 1.0x, more buffer is the first
+answer; a render-ahead design (non-blocking writes, rendering in sub-period
+chunks between `snd_pcm_avail()` checks) would absorb jitter at the cost of MIDI
+latency, and is the obvious next change if buffering is not enough.
 
 ## Installing as a service
 
@@ -188,58 +273,52 @@ journalctl -u sc55d -f
 
 The unit runs as a dedicated `sc55d` user in the `audio` group; `LimitRTPRIO`
 and `LimitMEMLOCK` are what let an unprivileged process get `SCHED_FIFO` and
-`mlockall()`. Drop the `User=`/`Group=` lines to run it as root instead, and
-edit `ExecStart` for your ROM path, audio device and CPU pinning.
-
-Routing MIDI to a service is the same `aconnect` call; a udev rule or a small
-`ExecStartPost=` is the usual way to make it automatic once the serial client
-appears.
+`mlockall()`. Drop the `User=`/`Group=` lines to run as root instead, and edit
+`ExecStart` for your ROM path, audio device and CPU pinning.
 
 ## How it fits together
 
 ```
-ALSA sequencer ──► midi_in.cpp ──► MCU_PostUART() ──► emulated serial port
-                                                            │
-                   main.cpp render loop ──► Core::Step() ──►┤ Nuked-SC55 core
-                                                            │
-ALSA pcm  ◄── audio_out.cpp ◄── Core::PullPage() ◄──────────┘
+ALSA sequencer ──► midi_in.cpp ──► Emulator::PostMIDI() ──► emulated serial port
+                                                                   │
+                   main.cpp render loop ──► Emulator::Step() ──────┤ Nuked-SC55
+                                                                   │
+ALSA pcm  ◄── audio_out.cpp ◄── Core::Frames() ◄── sample callback ┘
 ```
 
 One thread renders and writes: it steps the core until a period of frames is
 ready, hands that period to `snd_pcm_writei()`, and repeats. The blocking write
-is what paces the emulation — no timers, no drift. MIDI decoding runs on its own
-thread and posts bytes into the core's UART FIFO, exactly as upstream's RtMidi
-callback does.
+paces the emulation — no timers, no drift. MIDI decoding runs on its own thread
+and posts raw bytes into the core's UART FIFO.
 
-### What we had to do to the core, and why
+The core hands finished frames to a sample callback, which clamps them to 16-bit
+and appends to a small linear buffer. Because the loop only steps until one
+period is ready, and one instruction yields at most two frames, that buffer never
+holds much more than a period — so there is no ring, no wrap handling, and the
+bytes go to ALSA without another copy.
 
-Upstream's SDL frontend is not a separate file: `main()`, the SDL audio setup
-and the SDL work thread all live in `src/mcu.cpp` alongside the MCU itself, and
-`src/mcu.h` includes `SDL_atomic.h`. Since the submodule is never patched, the
-build works around that from our side:
+### Why this fork
 
-* **`src/sdl_compat/`** — a small stand-in for the slice of SDL2 the core names.
-  Atomics, mutexes and threads are real (pthreads). The audio device is virtual:
-  `MCU_OpenAudio()` still allocates the core's sample ring and registers its
-  callback, and sc55d pumps that callback by hand from the render loop.
-* **`main` is renamed at compile time.** `mcu.cpp` is compiled with
-  `-Dmain=nuked_sc55_sdl_main_unused`, so upstream's SDL `main()` becomes dead
-  code in the same object file as the MCU, and `src/main.cpp` provides the real
-  entry point.
-* **`src/stubs.cpp`** — no-op `LCD_*` and `MIDI_*` functions, replacing
-  `lcd.cpp` (SDL video) and `midi_rtmidi.cpp`, which are left out of the build.
-  One piece is not a no-op: on the SC-55mk1 the gate array raises an interrupt
-  shortly after each LCD write and the mk1 firmware waits for it, so the stub
-  keeps that timer running.
-* **`src/romset.cpp`** — ROM selection and loading. Upstream's copy is inside
-  its `main()`, so it is re-done here against the core's own file-name table,
-  with the same autodetect order and the same model flags.
-* **`src/core.cpp`** — the body of upstream's `work_thread()`, minus its SDL
-  ring bookkeeping, plus a frame counter so the render loop knows when a period
-  is ready.
+Upstream's frontend is not a separate file: `main()`, the SDL audio setup and
+the work thread all live in `mcu.cpp` next to the MCU, and `mcu.h` includes
+`SDL_atomic.h`. Building a headless frontend against it meant a stand-in SDL
+header set, a compile-time rename of upstream's `main`, and no-op LCD stubs.
+The [jcmoyer fork](https://github.com/jcmoyer/Nuked-SC55) removes the need for
+all of that:
 
-Nothing in `vendor/nuked-sc55` is modified. Updating the submodule is a
-`git submodule update --remote` plus a rebuild.
+- the emulator is a library with **no SDL dependency** and a real API
+  (`Init` / `LoadRoms` / `Reset` / `PostMIDI` / `Step` / `SetSampleCallback`);
+- the LCD is an injectable backend, and passing null **skips LCD emulation**;
+- ROM loading does **SHA-256 identification** with proper diagnostics, including
+  specific ROM revisions;
+- `PCM_GetOutputFrequency()` reports the **correct half rate** when the machine
+  is not oversampling, which upstream gets wrong;
+- the core's log output goes through a **callback** we can cap;
+- their changelog reports *"optimized interrupt handling for a 10-16% overall
+  performance improvement."*
+
+It tracks upstream behaviour deliberately, including bugs, and carries the same
+licence. Bugs reproducible on both belong upstream.
 
 ## Layout
 

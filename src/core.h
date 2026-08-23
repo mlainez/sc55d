@@ -2,60 +2,17 @@
 
 #include <cstddef>
 #include <cstdint>
-
-#include "mcu.h"
-
-/*
- * Symbols the Nuked-SC55 core exports but does not declare in a header.  They
- * live in mcu.cpp; sc55d needs them because upstream drives them from its own
- * main()/work thread, which we do not build.
- */
-void MCU_Init(void);
-void MCU_Reset(void);
-void MCU_PatchROM(void);
-void MCU_ReadInstruction(void);
-void MCU_UpdateAnalog(uint64_t cycles);
-void MCU_UpdateUART_RX(void);
-void MCU_UpdateUART_TX(void);
-int MCU_OpenAudio(int deviceIndex, int pageSize, int pageNum);
-void MCU_CloseAudio(void);
-void unscramble(uint8_t *src, uint8_t *dst, int len);
-
-extern uint8_t rom1[];
-extern uint8_t rom2[];
-extern uint8_t tempbuf[];
-extern int rom2_mask;
-extern const char *roms[ROM_SET_COUNT][6];
+#include <string>
 
 namespace Core {
 
-/* Allocates the core's sample ring and resets the machine.  ROMs must already
- * be loaded (see romset.h).  `page_frames` is how many stereo frames one
- * PullPage() call yields; `pages` sizes the ring at 2 * pages * page_frames
- * frames.  Returns false if the ring could not be allocated. */
-bool Start(int page_frames, int pages);
-void Stop();
+/* Routes the core's own log messages through sc55d, capped at `limit` messages
+ * so a misbehaving ROM cannot flood the journal (0 = no cap).  `quiet` silences
+ * them outright.  Call before Load(). */
+void SetDiagnostics(unsigned long limit, bool quiet);
 
-/* Native output rate of the loaded romset: 66207 Hz for the SC-55mk2 family,
- * 64000 Hz for the mk1 and JV-880. */
-int SampleRate();
-
-int PageFrames();
-
-/* Runs one instruction and the peripherals that hang off it.  This is the body
- * of upstream's work_thread(), minus its SDL ring bookkeeping. */
-void Step();
-
-/* Stereo frames rendered but not yet pulled. */
-uint64_t FramesReady();
-
-/* Drains exactly PageFrames() frames into `dst` (PageFrames() * 2 int16_t).
- * Step() until FramesReady() >= PageFrames() first. */
-void PullPage(int16_t *dst);
-
-/* Feeds raw MIDI bytes to the emulated serial port, the way upstream's RtMidi
- * callback does. */
-void PostMidi(const uint8_t *data, size_t length);
+/* Core messages dropped by that cap. */
+unsigned long SuppressedMessages();
 
 enum class Reset {
     None,
@@ -63,6 +20,44 @@ enum class Reset {
     GS,
 };
 
+/* Finds and loads a ROM set from `rom_dir`.  `model` is a romset name
+ * ("mk2", "st", "mk1", ...); empty means autodetect.  `verify` picks the
+ * content-hashing loader, which identifies ROMs by SHA-256 regardless of file
+ * name; without it the loader falls back to upstream's file-name convention.
+ * Prints the core's own diagnostics and returns false on failure. */
+bool Load(const std::string &rom_dir, const std::string &model, bool verify);
+
+/* Brings up the machine.  `page_frames` is the chunk the render loop works in.
+ * No LCD backend is installed, so the core skips LCD emulation entirely. */
+bool Start(int page_frames);
+
+const char *ModelName();
+
+/* Native output rate of the loaded romset. */
+int SampleRate();
+
+int PageFrames();
+
+/* Runs one instruction and the peripherals hanging off it.  Samples land in
+ * the output buffer through the core's sample callback. */
+void Step();
+
+/* Stereo frames rendered but not yet consumed. */
+size_t FramesReady();
+
+/* Rendered frames, interleaved and contiguous.  Valid up to FramesReady(). */
+const int16_t *Frames();
+
+/* Drops `frames` frames off the front, after they have been written out. */
+void Consume(int frames);
+
+void PostMidi(const uint8_t *data, size_t length);
 void PostReset(Reset type);
+
+/* Frames dropped because the render loop did not keep up with the callback.
+ * Should stay zero; non-zero means a bug in the loop, not an xrun. */
+unsigned long Overruns();
+
+void PrintModels();
 
 } // namespace Core

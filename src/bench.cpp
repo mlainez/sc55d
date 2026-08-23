@@ -105,8 +105,7 @@ std::vector<Event> BuildSequence(double seconds, int rate)
 
 /* Renders `frames` frames, posting `events` as their time arrives.  Returns the
  * number of frames actually rendered (short only if interrupted). */
-uint64_t Render(uint64_t frames, const std::vector<Event> *events,
-                std::vector<int16_t> &scratch)
+uint64_t Render(uint64_t frames, const std::vector<Event> *events)
 {
     const int page = Core::PageFrames();
     size_t next_event = 0;
@@ -120,10 +119,10 @@ uint64_t Render(uint64_t frames, const std::vector<Event> *events,
             Core::PostMidi(event.data, event.length);
         }
 
-        while (Core::FramesReady() < (uint64_t)page)
+        while (Core::FramesReady() < (size_t)page)
             Core::Step();
 
-        Core::PullPage(scratch.data());
+        Core::Consume(page);
         rendered += (uint64_t)page;
     }
 
@@ -136,7 +135,6 @@ int Run(double seconds, double warmup_seconds)
 {
     const int rate = Core::SampleRate();
     const int page = Core::PageFrames();
-    std::vector<int16_t> scratch((size_t)page * 2);
 
     printf("sc55d: benchmark: %.0f s of audio at %d Hz "
            "(after %.0f s of warm-up), output discarded\n",
@@ -145,7 +143,7 @@ int Run(double seconds, double warmup_seconds)
 
     /* Let the firmware boot and settle before the clock starts. */
     Core::PostReset(Core::Reset::GS);
-    Render((uint64_t)(warmup_seconds * rate), nullptr, scratch);
+    Render((uint64_t)(warmup_seconds * rate), nullptr);
 
     const std::vector<Event> events = BuildSequence(seconds, rate);
 
@@ -170,10 +168,10 @@ int Run(double seconds, double warmup_seconds)
             Core::PostMidi(event.data, event.length);
         }
 
-        while (Core::FramesReady() < (uint64_t)page)
+        while (Core::FramesReady() < (size_t)page)
             Core::Step();
 
-        Core::PullPage(scratch.data());
+        Core::Consume(page);
         rendered += (uint64_t)page;
         chunk_rendered += (uint64_t)page;
 

@@ -8,18 +8,13 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <string>
 #include <thread>
-#include <vector>
-
-#include <sys/stat.h>
 
 #include "audio_out.h"
 #include "bench.h"
 #include "core.h"
 #include "midi_in.h"
-#include "romset.h"
 #include "rt.h"
 
 namespace {
@@ -31,10 +26,12 @@ struct Options {
     std::string client_name = "sc55d";
     int period_frames = 256;
     int periods = 3;
-    int core_pages = 4;
     int cpu = -1;
     int priority = 70;
     bool realtime = true;
+    bool verify_roms = true;
+    bool quiet_core = false;
+    long core_log_limit = 100;
     bool bench = false;
     double bench_seconds = 30.0;
     Core::Reset reset = Core::Reset::None;
@@ -49,15 +46,19 @@ void PrintUsage()
         "\n"
         "ROMs:\n"
         "  --roms <dir>            Directory holding the ROM files (default: roms)\n"
-        "  --model <name>          mk2, st, mk1, cm300, jv880, scb55, rlp3237,\n"
-        "                          sc155, sc155mk2.  Default: autodetect, which\n"
-        "                          prefers SC-55mk2.\n"
+        "  --model <name>          ROM set to use; default is autodetect\n"
+        "  --list-models           List the ROM sets the core knows about\n"
+        "  --no-verify-roms        Match ROMs by file name instead of SHA-256\n"
+        "\n"
+        "Logging:\n"
+        "  --core-log-limit <n>    Cap the emulator's own messages (default: 100,\n"
+        "                          0 = no cap) so a bad ROM cannot flood the journal\n"
+        "  --quiet-core            Silence the emulator's messages entirely\n"
         "\n"
         "Audio:\n"
         "  --audio-device <name>   ALSA device (default: default)\n"
         "  --period-frames <n>     Frames per period (default: 256)\n"
         "  --periods <n>           Periods in the buffer (default: 3)\n"
-        "  --core-pages <n>        Depth of the core's sample ring (default: 4)\n"
         "\n"
         "MIDI:\n"
         "  --client-name <name>    ALSA sequencer client name (default: sc55d)\n"
@@ -96,14 +97,13 @@ bool ParseDouble(const char *text, double *out)
     return true;
 }
 
-/* Returns false on a bad argument; sets *done when we printed help. */
+/* Returns false on a bad argument; sets *done when we already printed output. */
 bool ParseOptions(int argc, char *argv[], Options *options, bool *done)
 {
     for (int i = 1; i < argc; i++)
     {
         const std::string arg = argv[i];
 
-        /* Consumes the next argv entry as the value of `arg`. */
         auto take = [&](const char **value) {
             if (i + 1 >= argc)
             {
@@ -133,10 +133,32 @@ bool ParseOptions(int argc, char *argv[], Options *options, bool *done)
             *done = true;
             return true;
         }
+        else if (arg == "--list-models")
+        {
+            Core::PrintModels();
+            *done = true;
+            return true;
+        }
         else if (arg == "--bench")
             options->bench = true;
         else if (arg == "--no-realtime")
             options->realtime = false;
+        else if (arg == "--no-verify-roms")
+            options->verify_roms = false;
+        else if (arg == "--quiet-core")
+            options->quiet_core = true;
+        else if (arg == "--core-log-limit")
+        {
+            int limit = 0;
+            if (!take_int(&limit))
+                return false;
+            if (limit < 0)
+            {
+                fprintf(stderr, "sc55d: --core-log-limit cannot be negative\n");
+                return false;
+            }
+            options->core_log_limit = limit;
+        }
         else if (arg == "--gm")
             options->reset = Core::Reset::GM;
         else if (arg == "--gs")
@@ -173,11 +195,6 @@ bool ParseOptions(int argc, char *argv[], Options *options, bool *done)
         else if (arg == "--periods")
         {
             if (!take_int(&options->periods))
-                return false;
-        }
-        else if (arg == "--core-pages")
-        {
-            if (!take_int(&options->core_pages))
                 return false;
         }
         else if (arg == "--cpu")
@@ -217,57 +234,12 @@ bool ParseOptions(int argc, char *argv[], Options *options, bool *done)
         fprintf(stderr, "sc55d: --periods must be between 2 and 64\n");
         return false;
     }
-    if (options->core_pages < 2 || options->core_pages > 256)
-    {
-        fprintf(stderr, "sc55d: --core-pages must be between 2 and 256\n");
-        return false;
-    }
     if (options->bench_seconds <= 0.0)
     {
         fprintf(stderr, "sc55d: --bench-seconds must be positive\n");
         return false;
     }
     return true;
-}
-
-bool DirectoryExists(const std::string &path)
-{
-    struct stat info;
-    return stat(path.c_str(), &info) == 0 && S_ISDIR(info.st_mode);
-}
-
-/* Resolves the romset, or explains what is missing and returns -1. */
-int ResolveRomset(const Options &options)
-{
-    if (!options.model.empty())
-    {
-        int romset = ROM_SET_MK2;
-        if (!Romset::Parse(options.model, &romset))
-        {
-            fprintf(stderr, "sc55d: unknown model \"%s\"\n", options.model.c_str());
-            return -1;
-        }
-        return romset;
-    }
-
-    const int detected = Romset::Autodetect(options.rom_dir);
-    if (detected >= 0)
-    {
-        printf("sc55d: ROM set autodetect: %s\n", Romset::Name(detected));
-        return detected;
-    }
-
-    if (!DirectoryExists(options.rom_dir))
-        fprintf(stderr, "sc55d: ROM directory %s does not exist.\n", options.rom_dir.c_str());
-    else
-        fprintf(stderr, "sc55d: no complete ROM set found in %s.\n", options.rom_dir.c_str());
-
-    fprintf(stderr,
-            "sc55d: copy your Nuked-SC55 ROM files there, or point --roms at the\n"
-            "       directory holding them.  File names follow the upstream\n"
-            "       Nuked-SC55 convention; --model picks a set explicitly.\n");
-    Romset::PrintExpectedFiles(options.rom_dir, ROM_SET_MK2);
-    return -1;
 }
 
 int RunDaemon(const Options &options)
@@ -289,26 +261,29 @@ int RunDaemon(const Options &options)
 
     Core::PostReset(options.reset);
 
-    printf("sc55d: running (%s, %d Hz native)\n",
-           Romset::Name(romset), Core::SampleRate());
+    printf("sc55d: running (%s, %d Hz native)\n", Core::ModelName(), Core::SampleRate());
     fflush(stdout);
 
     const int page = Core::PageFrames();
-    std::vector<int16_t> buffer((size_t)page * 2);
 
     while (!g_quit.load(std::memory_order_relaxed))
     {
         /* One period is bounded work, so the quit flag only needs checking
          * here rather than on every instruction. */
-        while (Core::FramesReady() < (uint64_t)page)
+        while (Core::FramesReady() < (size_t)page)
             Core::Step();
 
-        Core::PullPage(buffer.data());
-        if (!AudioOut::Write(buffer.data(), (unsigned)page))
+        const bool ok = AudioOut::Write(Core::Frames(), (unsigned)page);
+        Core::Consume(page);
+        if (!ok)
             break;
     }
 
     printf("\nsc55d: shutting down (%lu xruns)\n", AudioOut::Xruns());
+    if (Core::Overruns())
+        fprintf(stderr, "sc55d: %lu frames dropped inside the core buffer\n", Core::Overruns());
+    if (Core::SuppressedMessages())
+        fprintf(stderr, "sc55d: %lu core messages suppressed\n", Core::SuppressedMessages());
     fflush(stdout);
 
     g_quit.store(true, std::memory_order_relaxed);
@@ -331,23 +306,13 @@ int main(int argc, char *argv[])
         return 0;
 
     Rt::InstallSignalHandlers();
+    Core::SetDiagnostics((unsigned long)options.core_log_limit, options.quiet_core);
 
-    const int selected = ResolveRomset(options);
-    if (selected < 0)
+    if (!Core::Load(options.rom_dir, options.model, options.verify_roms))
         return 1;
 
-    if (!Romset::Load(options.rom_dir, selected))
-    {
-        Romset::PrintExpectedFiles(options.rom_dir, selected);
+    if (!Core::Start(options.period_frames))
         return 1;
-    }
-    romset = selected;
-
-    if (!Core::Start(options.period_frames, options.core_pages))
-    {
-        fprintf(stderr, "sc55d: cannot start the emulation core\n");
-        return 1;
-    }
 
     if (options.realtime)
         Rt::LockMemory();
@@ -366,6 +331,5 @@ int main(int argc, char *argv[])
         status = RunDaemon(options);
     }
 
-    Core::Stop();
     return status;
 }
