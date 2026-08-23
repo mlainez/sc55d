@@ -14,6 +14,88 @@ library can be pointed at this workload. Short answers first:
 
 All line references are to the `vendor/nuked-sc55` submodule.
 
+## Why this is so much heavier than mt32-pi
+
+mt32-pi runs comfortably on a Pi 3. It is reasonable to ask why an SC-55 cannot.
+The answer is not that mt32-pi is better written — it is solving a fundamentally
+cheaper problem.
+
+**Munt, which mt32-pi uses, is a high-level emulator.** It reads the MT-32's
+ROMs and reimplements LA synthesis — partials, envelopes, filters — as ordinary
+DSP code. It does not execute the MT-32's firmware instruction by instruction,
+and it does not model its synthesis chip gate by gate. It computes the samples
+the hardware would have produced.
+
+**Nuked-SC55 is a low-level emulator.** It runs the SC-55's H8/532 firmware one
+instruction at a time, runs a *second* CPU (the sub-MCU) alongside it on the
+mk2, models the PCM chip's 32 voice slots at gate level 33103 times a second,
+and steps the timers every two MCU cycles. It does not compute what the hardware
+would produce; it simulates the hardware and lets the samples fall out.
+
+Measured by others on the same machine with the same MIDI file: **Munt in
+integer mode 5–10% CPU, Nuked-SC55 30–40%.** Roughly a 5x difference, and it is
+inherent to the approach rather than a defect to be optimised away. nukeykt has
+said he intends to write a *low-level* MT-32 emulator "similar to Nuked SC-55",
+which is the clearest confirmation that Munt is not one — and when that exists,
+it will be expensive too.
+
+One more difference that is *not* the reason: mt32-pi is bare metal, on Circle,
+with no Linux underneath. That buys it superb jitter behaviour, but jitter is
+not our problem. Ours is raw throughput, and bare metal does not make
+instructions cheaper.
+
+### What that means for a Pi 3
+
+The most useful real-world datapoint comes from
+[PR #51](https://github.com/nukeykt/Nuked-SC55/pull/51) against upstream, whose
+author optimised specifically for this: they got a **Pi 4 at stock 1.8 GHz to
+85–90% of one thread**, which they described as making it "usable". On an M1 the
+same work took CPU from 39–41% down to 26–28%.
+
+A Pi 3 is about 1.2 GHz, and its Cortex-A53 is *in-order* where the Pi 4's A72 is
+out-of-order — call it 0.6x the work per clock, and 0.67x the clock. That puts a
+Pi 3 somewhere around **2.5–3.5x short of realtime**, optimised. Nothing in this
+document closes a gap that size.
+
+So: a Pi 4 is plausible and a Pi 5 is comfortable, but **a Pi 3 running
+Nuked-SC55 in realtime looks out of reach**, and honest planning should assume
+it. `scripts/pi-check.sh --roms <dir>` on the actual board is what settles it.
+
+### What is worth borrowing
+
+PR #51 is the closest thing to prior art for our exact problem. Its five
+techniques, and what each is worth to us:
+
+| Technique | Verdict |
+|---|---|
+| Lookup tables replacing conditionals | **Measured, rejected.** Tried on the hottest such site, `PCM_ReadROM`; slightly slower, because the branches are perfectly predictable and a table adds a dependent load. See `patches/README.md`. |
+| Re-sorting `if`/`switch` cases by hit frequency | **Already automated, better.** This is hand-rolled PGO. We wire real PGO up via `-DSC55D_PGO=generate/use`, which derives the same layout from measurement rather than guesswork. |
+| `inline` on hot functions | **Subsumed by LTO**, which is on by default. |
+| Removing interrupt checks | **Unsafe.** The author had to re-enable them for compatibility. |
+| Adjusting sub-MCU cycle counts | **Unsafe.** Changing cycle counts changes timing, which changes output. Not bit-exact. |
+
+Two of the five are correctness hazards, two we already do automatically, and
+the one genuinely novel idea measured negative here. Some of that reported 35%
+was very likely bought with the two unsafe ones. PR #51 was never merged — it
+was closed in April 2024 over the licence, and the author deleted their fork —
+and jcmoyer's fork does not carry it either; its only performance entry is the
+interrupt-handling work worth 10–16%.
+
+### The real lesson from mt32-pi
+
+If a Pi 3 is a hard requirement, the answer is not to keep shaving the
+gate-level emulator. It is to move down the accuracy dial, exactly as mt32-pi
+did by using Munt. The SC-55 equivalent is
+[EmuSC](https://github.com/skjelten/emusc), which extracts the control and PCM
+ROM data and reimplements the synth's behaviour in modern C++ — Munt's approach
+applied to the Sound Canvas. It is less mature and targets the original SC-55
+rather than the mk2, so it is a real trade, not a free win.
+
+Worth noting: sc55d is structured so that this would be a contained change.
+Everything outside `src/core.cpp` — ALSA sequencer input, ALSA output, the
+realtime setup, the benchmark — is emulator-agnostic. `Core` is a thin wrapper
+over one backend and could wrap another.
+
 ## What the inner loop actually is
 
 Per emulated instruction the core runs the MCU interpreter, then advances three
