@@ -297,6 +297,55 @@ answer; a render-ahead design (non-blocking writes, rendering in sub-period
 chunks between `snd_pcm_avail()` checks) would absorb jitter at the cost of MIDI
 latency, and is the obvious next change if buffering is not enough.
 
+## Testing on a Raspberry Pi
+
+One command does the whole readiness check on the board:
+
+```bash
+git clone --recurse-submodules <this repo>
+cd sc55d
+./scripts/pi-check.sh --roms /path/to/roms
+```
+
+It reports the model and whether the userland is 64-bit, picks `-mcpu` from the
+CPU part number, builds, runs the patch equivalence tests, then checks the
+things that actually decide whether audio glitches — cpufreq governor,
+throttling flags, `isolcpus`, the RTPRIO limit, whether an ALSA device exists —
+and finishes with the benchmark. It changes nothing; it only tells you what to
+change. Without `--roms` it does everything except the benchmark.
+
+**A Pi 3 needs the 64-bit image.** The core counts cycles in `uint64_t`
+throughout and a 32-bit armhf userland pays for every one of them. The script
+warns if it finds `armv7l`.
+
+Before enabling the core patches, prove they are safe on your ROMs:
+
+```bash
+./scripts/validate-patches.sh --roms /path/to/roms
+```
+
+That builds the core patched and unpatched, renders the same sequence with
+each across every romset, and compares audio digests. Only then:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSC55D_CPU=cortex-a53 \
+      -DSC55D_PATCH_CORE=ON
+```
+
+### What has been verified off-board
+
+Short of a real Pi, the following were checked here:
+
+- Builds and runs correctly cross-compiled for **`-mcpu=cortex-a53`** and
+  executed on aarch64 (`cmake/aarch64-linux-gnu.cmake` is the toolchain file).
+- Both patch equivalence tests pass compiled for A53 and run on aarch64.
+- Builds with **GCC 12**, which is what Raspberry Pi OS Bookworm ships — the
+  core requires C++23, so that was worth confirming.
+
+What has *not* been verified is anything about speed on real hardware, or the
+audio path, since there are no ROMs and no sound device here. The benchmark on
+your Pi is the only number that settles whether this works.
+
 ## Installing as a service
 
 `contrib/sc55d.service` is a systemd unit (`After=sound.target`,
@@ -367,9 +416,11 @@ licence. Bugs reproducible on both belong upstream.
 
 ```
 CMakeLists.txt          one executable target, sc55d
+cmake/                  aarch64 cross-compilation toolchain file
 contrib/sc55d.service   systemd unit
 docs/                   design and optimisation notes
 patches/                core patches, applied at build time
+scripts/                pi-check.sh, validate-patches.sh
 src/                    everything sc55d adds
 vendor/nuked-sc55/      the emulation core, unmodified (submodule)
 ```
