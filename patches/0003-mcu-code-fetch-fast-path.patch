@@ -1,0 +1,57 @@
+mcu: peel the ROM cases off the instruction-fetch path
+
+Every instruction fetch calls MCU_Read(), which decodes the page with a switch
+and, for page 0, a chain of range tests, in order to reach one of two plain
+array indexings that have no side effects.  Code lives in ROM, so handle those
+two cases in the header where they inline into MCU_ReadCodeAdvance() and the
+call disappears.
+
+Measured on the mk2 benchmark (32 PCM slots, placeholder ROMs, callgrind Ir):
+7,864,728,794 -> 7,836,682,972, -0.36%.  That understates the effect: with
+placeholder ROMs the program counter sweeps the whole 64 KiB of page 0, so only
+about 56% of fetches land in ROM1.  Real firmware fetches from ROM essentially
+always.
+
+Proof: patches/tests/mcu_code_fetch_equivalence.cpp links the real MCU_Read()
+against side-effect-recording stubs and checks all 2^20 (cp, pc) pairs for all
+nine romsets.
+
+--- a/src/backend/mcu.h
++++ b/src/backend/mcu.h
+@@ -322,8 +322,35 @@
+     return ((uint32_t)page << 16) + address;
+ }
+ 
++// Instruction fetch. Every fetch goes through MCU_Read(), whose page decode is
++// a switch plus, for page 0, a chain of range tests -- all of it to reach one
++// of two array indexings that carry no side effects. Code lives in ROM, so peel
++// those two cases off in the header where they inline into the fetch.
++//
++// These reproduce MCU_Read()'s cases exactly:
++//
++//   page 0, address < 0x8000     ->  rom1[address & 0x7fff]
++//   pages 1..4                   ->  rom2[address_rom & rom2_mask]
++//
++// With address = (cp << 16) + pc and cp <= 4 the page is cp, the low 16 bits
++// are pc, and bit 0x80000 (the only thing that alters address_rom) is clear.
++// Neither case reads or writes anything but the ROM array, so declining to
++// call MCU_Read() cannot lose an access side effect. Anything else -- I/O
++// space, RAM, SRAM, the unmapped pages -- falls through to MCU_Read() as
++// before. See patches/tests/mcu_code_fetch_equivalence.cpp.
+ inline uint8_t MCU_ReadCode(mcu_t& mcu) {
+-    return MCU_Read(mcu, MCU_GetAddress(mcu.cp, mcu.pc));
++    const uint8_t  cp = mcu.cp;
++    const uint16_t pc = mcu.pc;
++    if (cp == 0)
++    {
++        if (!(pc & 0x8000))
++            return mcu.rom1[pc];
++    }
++    else if (cp <= 4)
++    {
++        return mcu.rom2[(((uint32_t)cp << 16) | pc) & 0x3ffffu & mcu.rom2_mask];
++    }
++    return MCU_Read(mcu, MCU_GetAddress(cp, pc));
+ }
+ 
+ inline uint8_t MCU_ReadCodeAdvance(mcu_t& mcu) {

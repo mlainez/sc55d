@@ -341,6 +341,59 @@ be built the same way 0001 was: a differential harness that drives a modelled
 and a real timer side by side over random register programming, checking full
 state after every call.
 
+## The wave ROM is the Pi 3 cache risk, and this benchmark hides it
+
+Simulated under a Cortex-A53-like configuration (`--I1=32768,4,64
+--D1=32768,4,64 --LL=524288,16,64`), the emulator looks **entirely
+cache-resident**: `TIMER_Clock` takes 18 D1 read misses over 637M reads,
+`SM_Update` 25 over 270M, `MCU_Interrupt_Handle` 2.87% of all write misses are
+the one-time zeroing of `pcm_t` (15.7 MB) and `mcu_t` (665 KB) at startup.
+
+**That result is an artefact and should not be believed.** `PCM_ReadROM` shows
+60 D1 misses out of 74.3M reads — because with a zero wave ROM the firmware
+never programs a voice, so it reads essentially one address 14.9M times. On real
+ROMs those same ~10.6M reads per second are spread by up to 28 voices across
+2–4 MB. Modelled under the same cache geometry with 28 streams over a 4 MiB ROM:
+
+| byte stride (set by pitch) | D1 miss | LL miss | implied Pi 3 stall per second of audio |
+|---|---|---|---|
+| 1 | 3.4% | 1.1% | ~11 ms |
+| 4 | 5.6% | 3.4% | ~36 ms |
+| 16 | 14.6% | 12.8% | ~136 ms |
+| 64 | 50.6% | 50.3% | ~533 ms |
+
+So wave ROM access is worth somewhere between **1% and 50% of a core** depending
+on how far the music is pitched up, and nothing in the emulator's own data
+structures comes close to it. It is invisible to every measurement in this
+repository. If a Pi is short of realtime and the profile does not explain why,
+this is the first place to look — and prefetching the next sample address per
+voice, which is predictable from the phase accumulator, is the obvious
+experiment.
+
+(`MCU_Read`'s 98,131 misses are the same kind of artefact in reverse: `pc`
+sweeps all 64 KB of page 0 forever because the ROM is zeros. Real firmware has
+locality.)
+
+## Where the per-instruction time goes
+
+1,231 retired instructions per emulated MCU instruction, before any patches:
+
+| | Ir/instruction | share |
+|---|---|---|
+| `PCM_Update` | 439 | 35.7% |
+| `TIMER_Clock` | 361 | 29.4% |
+| `SM_Update` | 222 | 18.1% |
+| `MCU_Interrupt_Handle` | 54 | 4.4% |
+| `MCU_Step` own body | 30 | 2.4% |
+| code fetch via `MCU_Read` | 25 | 2.0% |
+| opcode dispatch | 2 | 0.2% |
+
+Inside `pcm.cpp` with all 32 voices sounding, the slot loop body is 45% and
+**`calc_tv` is 31%** — not the 3.7% an earlier profile suggested, which counted
+only the out-of-line clone and missed the two copies GCC inlines. `sx20` /
+`addclip20` / `multi` are 13%, though that is inflated on x86: `(in << 12) >> 12`
+is two instructions there and a single `sbfx` on AArch64.
+
 ## Measuring this yourself: two traps
 
 Both cost a subagent real time here.

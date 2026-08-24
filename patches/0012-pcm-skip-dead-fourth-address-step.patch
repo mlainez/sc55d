@@ -1,0 +1,126 @@
+pcm: skip the address generator's dead fourth step
+
+The voice loop walks the wave address forward five times per slot and reads the
+wave ROM at each stop, but the last stop is only ever used when the voice is
+pitched at four or more wave samples per output sample. sub_phase_of is
+(sub_phase >> 14) & 7, where sub_phase is a 14-bit accumulator plus a 16-bit
+increment, so it is 0..4; everything after the third increment feeds only the
+`sub_phase_of >= 3` and `>= 4` updates and the samp3 term of the DPCM
+accumulation, which is itself guarded on `>= 4`. b15 is deliberately not
+advanced past step 3 in the original, and address_cmp, address_cnt, cmp1, cmp2
+and nibble_cmp6 are all dead afterwards, so below the threshold the whole tail
+-- including one of the five wave ROM reads -- can be skipped outright.
+
+Because the win is data-dependent the harness grew two modes with the phase
+increments spread across the full 16-bit range, so sub_phase_of covers 0..4
+rather than the 0..1 that ordinary pitches produce. Both are in the numbers
+below.
+
+Measured on the ROM-free voice-loop harness, all 32 voices keyed on:
+29577 -> 27741 Ir per tick (-6.2%) at ordinary pitches, and 30482 -> 28899
+(-5.2%) with sub_phase_of spread over 0..4 including 24% of slots at 4, where
+the step cannot be skipped at all.
+
+--- a/src/backend/pcm.cpp
++++ b/src/backend/pcm.cpp
+@@ -1238,38 +1238,53 @@
+             address_cnt = address_cnt2 & 0xfffff; // 19
+             b15 = b6 && (b15 ^ address_cmp); // 19
+ 
+-            int samp3 = (int8_t)PCM_ReadROM(pcm, (uint32_t)((hiaddr << 20) | address_cnt)); // 5
+-
+-            cmp1 = address;
+-            cmp2 = address_cnt;
+-            const bool nibble_cmp5 = (cmp1 & 0xffff0) == (cmp2 & 0xffff0); // 20
+-            cmp1 = b15 ? address_loop : address_end;
+-            cmp2 = address_cnt;
+-            address_cmp = (cmp1 & 0xfffff) == (cmp2 & 0xfffff); // 21
++            // Everything left in the address generator is consumed only by the
++            // `sub_phase_of >= 3` and `>= 4` updates below and by the samp3 term
++            // of the DPCM accumulation, which is itself guarded on `>= 4`.  b15
++            // is deliberately not advanced past step 3 in the original, and
++            // address_cmp, address_cnt, cmp1, cmp2 and nibble_cmp6 are all dead
++            // after this point, so when sub_phase_of is below the threshold the
++            // whole tail - including one of the five wave ROM reads - can be
++            // skipped outright.  sub_phase_of is (sub_phase >> 14) & 7 where
++            // sub_phase is a 14-bit accumulator plus a 16-bit increment, so it
++            // reaches 3 or 4 only for voices pitched three or four wave samples
++            // per output sample.
++            int samp3 = 0;
++            bool nibble_cmp5 = false;
+ 
+             if (sub_phase_of >= 3)
+             {
+                 next_address = address_cnt; // 21
+-                usenew = !nibble_cmp5;
+                 next_b15 = b15;
+-            }
+-
+-            address_cnt2 = (!b6 && address_cmp) ? address_loop : address_cnt;
+ 
+-            if (!address_cmp)
+-                address_cnt2 += (b6 && b15) ? -stepdir : stepdir;
+-            address_cnt = address_cnt2 & 0xfffff; // 23
+-            // b15 = b6 && (b15 ^ address_cmp); // 23
+-
+-            cmp1 = address;
+-            cmp2 = address_cnt;
+-            const bool nibble_cmp6 = (cmp1 & 0xffff0) == (cmp2 & 0xffff0); // 24
++                cmp1 = address;
++                cmp2 = address_cnt;
++                nibble_cmp5 = (cmp1 & 0xffff0) == (cmp2 & 0xffff0); // 20
++                usenew = !nibble_cmp5;
+ 
+-            if (sub_phase_of >= 4)
+-            {
+-                next_address = address_cnt; // 1
+-                usenew = !nibble_cmp6;
+-                // b15 is not updated?
++                if (sub_phase_of >= 4)
++                {
++                    samp3 = (int8_t)PCM_ReadROM(pcm, (uint32_t)((hiaddr << 20) | address_cnt)); // 5
++
++                    cmp1 = b15 ? address_loop : address_end;
++                    cmp2 = address_cnt;
++                    address_cmp = (cmp1 & 0xfffff) == (cmp2 & 0xfffff); // 21
++
++                    address_cnt2 = (!b6 && address_cmp) ? address_loop : address_cnt;
++
++                    if (!address_cmp)
++                        address_cnt2 += (b6 && b15) ? -stepdir : stepdir;
++                    address_cnt = address_cnt2 & 0xfffff; // 23
++                    // b15 = b6 && (b15 ^ address_cmp); // 23
++
++                    cmp1 = address;
++                    cmp2 = address_cnt;
++                    const bool nibble_cmp6 = (cmp1 & 0xffff0) == (cmp2 & 0xffff0); // 24
++
++                    next_address = address_cnt; // 1
++                    usenew = !nibble_cmp6;
++                    // b15 is not updated?
++                }
+             }
+ 
+             if (active && pcm.nfs)
+@@ -1314,14 +1329,16 @@
+             if (sub_phase_of >= 3)
+                 reference = addclip20(reference, shifted >> 1, shifted & 1);
+ 
+-            preshift = samp3 << 10;
+-            select_nibble = nibble_cmp5 ? old_nibble : newnibble;
+-            shift = (10 - select_nibble) & 15;
++            if (sub_phase_of >= 4)
++            {
++                preshift = samp3 << 10;
++                select_nibble = nibble_cmp5 ? old_nibble : newnibble;
++                shift = (10 - select_nibble) & 15;
+ 
+-            shifted = (preshift << 1) >> shift;
++                shifted = (preshift << 1) >> shift;
+ 
+-            if (sub_phase_of >= 4)
+                 reference = addclip20(reference, shifted >> 1, shifted & 1);
++            }
+ 
+             // interpolation
+ 

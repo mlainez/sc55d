@@ -1,0 +1,173 @@
+pcm: fold the voice loop's address-step boolean algebra
+
+Each of the four address steps in the voice loop, and the matching one in the
+pseudo-slot 31 generator, computes
+
+    add = (!cmp && b6 && !b15) || (!cmp && !b6);
+    sub =  !cmp && b6 &&  b15;
+    cnt = b7 ? cnt - (add - sub) : cnt + (add - sub);
+
+(add - sub) has only three values: 0 when cmp, -1 when (b6 && b15), +1
+otherwise. b7 is fixed for the slot, so the whole thing is one signed step whose
+direction is a loop-invariant. The `kon ||` in the select above it cannot change
+the outcome either: when (!b6 && address_cmp) holds the selected value is
+address_loop whichever arm is taken, and when it does not, both arms are
+address_cnt. Both rewrites are exact, not approximations.
+
+pcm.config.reg_slots is also read three times per slot iteration -- the loop
+bound, the slot2 select and the last-slot test. Nothing inside PCM_Update can
+write it (PCM_Write is the only writer and is never called from here), but the
+compiler reloads it anyway because the slot pointers alias into the same object.
+Hoisted into a local.
+
+Measured on the ROM-free voice-loop harness, all 32 voices keyed on:
+32458 -> 31543 Ir per tick (-2.8%).
+
+--- a/src/backend/pcm.cpp
++++ b/src/backend/pcm.cpp
+@@ -1044,16 +1044,10 @@
+ 
+                     int next_address = address_cnt; // 11
+ 
+-                    cmp1 = (!b6 && address_cmp) ? address_loop : address_cnt;
+-                    cmp2 = address_cnt;
+-                    int address_cnt2 = (kon || (!b6 && address_cmp)) ? cmp1 : cmp2;
++                    int address_cnt2 = (!b6 && address_cmp) ? address_loop : address_cnt;
+ 
+-                    const bool address_add = (!address_cmp && b6 && !b15) || (!address_cmp && !b6);
+-                    const bool address_sub = !address_cmp && b6 && b15;
+-                    if (b7)
+-                        address_cnt2 -= address_add - address_sub;
+-                    else
+-                        address_cnt2 += address_add - address_sub;
++                    if (!address_cmp)
++                        address_cnt2 += (b6 && b15) ? (b7 ? 1 : -1) : (b7 ? -1 : 1);
+                     address_cnt = address_cnt2 & 0xfffff; // 11
+                     b15 = b6 && (b15 ^ address_cmp); // 11
+ 
+@@ -1092,7 +1086,8 @@
+         pcm.rcsum[0] = 0;
+         pcm.rcsum[1] = 0;
+ 
+-        for (int slot = 0; slot < pcm.config.reg_slots; slot++)
++        const int nslots = pcm.config.reg_slots;
++        for (int slot = 0; slot < nslots; slot++)
+         {
+             uint32_t *ram1 = pcm.ram1[slot];
+             uint16_t *ram2 = pcm.ram2[slot];
+@@ -1107,6 +1102,14 @@
+             bool b15 = (ram2[8] & 0x8000) != 0; // 0
+             const bool b6 = (ram2[7] & 0x40) != 0; // 1
+             const bool b7 = (ram2[7] & 0x80) != 0; // 1
++            // Each of the four address steps below computed
++            //     add = (!cmp && b6 && !b15) || (!cmp && !b6);
++            //     sub = !cmp && b6 && b15;
++            //     cnt = b7 ? cnt - (add - sub) : cnt + (add - sub);
++            // (add - sub) is 0 when cmp, -1 when (b6 && b15), +1 otherwise, so
++            // the whole thing is a single signed step whose sign is fixed for
++            // the slot by b7.  Identical result, no per-step boolean algebra.
++            const int stepdir = b7 ? -1 : 1;
+             int hiaddr = (ram2[7] >> 8) & 15; // 1
+             int old_nibble = (ram2[7] >> 12) & 15; // 1
+ 
+@@ -1173,16 +1176,13 @@
+             bool usenew = !nibble_cmp2;
+             bool next_b15 = b15;
+ 
+-            cmp1 = (!b6 && address_cmp) ? address_loop : address_cnt;
+-            cmp2 = address_cnt;
+-            int address_cnt2 = (kon || (!b6 && address_cmp)) ? cmp1 : cmp2;
++            // `kon` cannot change the outcome here: when (!b6 && address_cmp)
++            // holds the selected value is address_loop either way, and when it
++            // does not, both arms of the outer select are address_cnt.
++            int address_cnt2 = (!b6 && address_cmp) ? address_loop : address_cnt;
+ 
+-            bool address_add = (!address_cmp && b6 && !b15) || (!address_cmp && !b6);
+-            bool address_sub = !address_cmp && b6 && b15;
+-            if (b7)
+-                address_cnt2 -= address_add - address_sub;
+-            else
+-                address_cnt2 += address_add - address_sub;
++            if (!address_cmp)
++                address_cnt2 += (b6 && b15) ? -stepdir : stepdir;
+             address_cnt = address_cnt2 & 0xfffff; // 11
+             b15 = b6 && (b15 ^ address_cmp); // 11
+ 
+@@ -1202,16 +1202,10 @@
+                 next_b15 = b15;
+             }
+ 
+-            cmp1 = (!b6 && address_cmp) ? address_loop : address_cnt;
+-            cmp2 = address_cnt;
+-            address_cnt2 = (kon || (!b6 && address_cmp)) ? cmp1 : cmp2;
++            address_cnt2 = (!b6 && address_cmp) ? address_loop : address_cnt;
+ 
+-            address_add = (!address_cmp && b6 && !b15) || (!address_cmp && !b6);
+-            address_sub = !address_cmp && b6 && b15;
+-            if (b7)
+-                address_cnt2 -= address_add - address_sub;
+-            else
+-                address_cnt2 += address_add - address_sub;
++            if (!address_cmp)
++                address_cnt2 += (b6 && b15) ? -stepdir : stepdir;
+             address_cnt = address_cnt2 & 0xfffff; // 15
+             b15 = b6 && (b15 ^ address_cmp); // 15
+ 
+@@ -1231,16 +1225,10 @@
+                 next_b15 = b15;
+             }
+ 
+-            cmp1 = (!b6 && address_cmp) ? address_loop : address_cnt;
+-            cmp2 = address_cnt;
+-            address_cnt2 = (kon || (!b6 && address_cmp)) ? cmp1 : cmp2;
++            address_cnt2 = (!b6 && address_cmp) ? address_loop : address_cnt;
+ 
+-            address_add = (!address_cmp && b6 && !b15) || (!address_cmp && !b6);
+-            address_sub = !address_cmp && b6 && b15;
+-            if (b7)
+-                address_cnt2 -= address_add - address_sub;
+-            else
+-                address_cnt2 += address_add - address_sub;
++            if (!address_cmp)
++                address_cnt2 += (b6 && b15) ? -stepdir : stepdir;
+             address_cnt = address_cnt2 & 0xfffff; // 19
+             b15 = b6 && (b15 ^ address_cmp); // 19
+ 
+@@ -1260,16 +1248,10 @@
+                 next_b15 = b15;
+             }
+ 
+-            cmp1 = (!b6 && address_cmp) ? address_loop : address_cnt;
+-            cmp2 = address_cnt;
+-            address_cnt2 = (kon || (!b6 && address_cmp)) ? cmp1 : cmp2;
++            address_cnt2 = (!b6 && address_cmp) ? address_loop : address_cnt;
+ 
+-            address_add = (!address_cmp && b6 && !b15) || (!address_cmp && !b6);
+-            address_sub = !address_cmp && b6 && b15;
+-            if (b7)
+-                address_cnt2 -= address_add - address_sub;
+-            else
+-                address_cnt2 += address_add - address_sub;
++            if (!address_cmp)
++                address_cnt2 += (b6 && b15) ? -stepdir : stepdir;
+             address_cnt = address_cnt2 & 0xfffff; // 23
+             // b15 = b6 && (b15 ^ address_cmp); // 23
+ 
+@@ -1465,7 +1447,7 @@
+             int rc1 = multi(sample3, (int8_t)((rc >> 0) & 255)) >> 5; // chorus
+             
+             // mix reverb/chorus?
+-            int slot2 = (slot == pcm.config.reg_slots - 1) ? 31 : slot + 1;
++            int slot2 = (slot == nslots - 1) ? 31 : slot + 1;
+             switch (slot2)
+             {
+                 // 17, 18 - reverb
+@@ -1518,7 +1500,7 @@
+             pcm.rcsum[0] = addclip20(pcm.rcsum[0], rc0 >> 1, rc0 & 1);
+             pcm.rcsum[1] = addclip20(pcm.rcsum[1], rc1 >> 1, rc1 & 1);
+ 
+-            if (slot != pcm.config.reg_slots - 1)
++            if (slot != nslots - 1)
+             {
+                 pcm.ram1[31][1] = (uint32_t)suml;
+                 pcm.ram1[31][3] = (uint32_t)sumr;

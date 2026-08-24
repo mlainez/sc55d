@@ -1,0 +1,35 @@
+pcm: move enable_oversampling out of the far end of the wave ROMs
+
+pcm_t declares enable_oversampling after 15 MiB of wave ROM arrays, at offset
+15,763,532.  PCM_Update() reads it once per emulated PCM sample, next to
+config.oversampling at offset 2,112, so the flag costs a cache line of its own
+that holds nothing else and is 15 MiB from every other field in the loop.
+Moving it next to config is free and bit-exact: pcm_t is never serialised or
+aggregate initialised.
+
+No measurable effect on this host (the line stays resident either way); it is
+one fewer line in the per-sample working set on a Pi 3, whose L2 is 512 KiB.
+
+--- a/src/backend/pcm.h
++++ b/src/backend/pcm.h
+@@ -77,6 +77,11 @@
+ 
+     PCM_Config config{};
+ 
++    // Read once per emulated PCM sample, alongside config.oversampling. Left at
++    // the end of the struct it sits 15 MiB past every other field PCM_Update()
++    // touches, on a cache line of its own that holds nothing else.
++    bool enable_oversampling = true;
++
+     uint16_t eram[0x4000]{};
+ 
+     uint8_t waverom1[0x200000]{};
+@@ -84,8 +89,6 @@
+     uint8_t waverom3[0x100000]{};
+     uint8_t waverom_card[0x200000]{};
+     uint8_t waverom_exp[0x800000]{};
+-
+-    bool enable_oversampling = true;
+ };
+ 
+ void PCM_Write(pcm_t& pcm, uint32_t address, uint8_t data);

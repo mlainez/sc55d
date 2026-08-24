@@ -1,0 +1,13 @@
+MISMATCH romset=mk2 cp=00 pc=8000: fast=a5 slow=b7 calls 0/0 state same
+MISMATCH romset=mk2 cp=00 pc=8001: fast=a3 slow=42 calls 0/0 state same
+MISMATCH romset=mk2 cp=00 pc=8002: fast=c4 slow=58 calls 0/0 state same
+MISMATCH romset=mk2 cp=00 pc=8003: fast=98 slow=3b calls 0/0 state same
+MISMATCH romset=mk2 cp=00 pc=8004: fast=88 slow=48 calls 0/0 state same
+MISMATCH romset=mk2 cp=00 pc=8005: fast=4d slow=1b calls 0/0 state same
+MISMATCH romset=mk2 cp=00 pc=8006: fast=1d slow=5c calls 0/0 state same
+MISMATCH romset=mk2 cp=00 pc=8007: fast=29 slow=b3 calls 0/0 state same
+MISMATCH romset=mk2 cp=00 pc=8008: fast=a7 slow=f6 calls 0/0 state same
+MISMATCH romset=mk2 cp=00 pc=8009: fast=11 slow=b5 calls 0/0 state same
+checked 188743680 (romset, rom2_mask, cp, pc) combinations over 9 romsets
+187466960 of them are side-effect-free reads the fast path may take
+FAIL: 1469295 mismatches

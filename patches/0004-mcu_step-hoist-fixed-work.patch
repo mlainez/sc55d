@@ -1,0 +1,70 @@
+mcu_step: decide the fixed per-instruction work once
+
+MCU_Step() runs twice per emulated instruction pair of tests that can only have
+one answer for a given romset, and makes one call that almost always does
+nothing:
+
+  * `!is_mk1 && !is_jv880 && !is_scb55` -- three loads and three branches to
+    re-derive a fact fixed when the romset is set.  MCU_SetRomset() is the only
+    place any of those flags changes, so it computes has_submcu there instead.
+
+  * MCU_UpdateAnalog()'s entire body is under `if (ctrl & 0x20)`; its else
+    branch is a single store of 0 to analog_end_time.  Testing the bit at the
+    call site keeps the call out of the common path.  This is outlining a cold
+    path, not reordering branches by frequency -- the bit is read either way.
+
+Measured (callgrind Ir, mk2, 32 PCM slots, placeholder ROMs), on top of 0001:
+7,836,682,972 -> 7,761,848,566, -0.96%; 11.7 instructions per emulated
+instruction.
+
+Proof: patches/tests/mcu_step_fixed_work_equivalence.cpp.
+
+--- a/src/backend/mcu.h
++++ b/src/backend/mcu.h
+@@ -274,6 +274,11 @@
+     bool is_scb55 = false; // 0 - sub mcu (e.g SC-55mk2), 1 - no sub mcu (e.g SCB-55)
+     bool is_sc155 = false; // 0 - SC-55(MK2), 1 - SC-155(MK2)
+ 
++    // Derived from the flags above by MCU_SetRomset(), which is the only place
++    // any of them changes. True when this romset has a sub-MCU that MCU_Step()
++    // has to clock; false when it drives the dummy UART instead.
++    bool has_submcu = true;
++
+     uint32_t rom2_mask = ROM2_SIZE - 1;
+ 
+     bool ga_int[8]{};
+--- a/src/backend/mcu.cpp
++++ b/src/backend/mcu.cpp
+@@ -926,7 +926,8 @@
+ 
+     TIMER_Clock(*mcu.timer, mcu.cycles);
+ 
+-    if (!mcu.is_mk1 && !mcu.is_jv880 && !mcu.is_scb55)
++    // has_submcu is the same predicate, decided once when the romset is set.
++    if (mcu.has_submcu)
+         SM_Update(*mcu.sm, mcu.cycles);
+     else
+     {
+@@ -934,7 +935,13 @@
+         MCU_UpdateUART_TX(mcu);
+     }
+ 
+-    MCU_UpdateAnalog(mcu, mcu.cycles);
++    // MCU_UpdateAnalog()'s whole body is under `if (ctrl & 0x20)`, and its else
++    // branch is this one store. Testing here keeps the call out of the common
++    // path; see patches/tests/mcu_step_fixed_work_equivalence.cpp.
++    if (mcu.dev_register[DEV_ADCSR] & 0x20)
++        MCU_UpdateAnalog(mcu, mcu.cycles);
++    else
++        mcu.analog_end_time = 0;
+ 
+     if (mcu.is_mk1)
+     {
+@@ -1056,5 +1063,7 @@
+         break;
+     }
+ 
++    mcu.has_submcu = !mcu.is_mk1 && !mcu.is_jv880 && !mcu.is_scb55;
++
+     TIMER_NotifyRomsetChange(*mcu.timer);
+ }

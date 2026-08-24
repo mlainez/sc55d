@@ -1,0 +1,162 @@
+pcm: skip voice slots whose key bit is clear  [OPTIONAL - see the numbers]
+
+A slot with its key bit clear produces nothing and remembers nothing. Every
+result the loop body computes for it is either discarded or overwritten by the
+`if (!active)` clear at the bottom of the loop: ram1[4] is written only when
+`active`, ram1[1]/ram1[3]/ram1[5] and ram2[8]/ram2[9]/ram2[10] are zeroed by the
+clear, ram2[7] is written only when `key`, and the IRQ is raised only when
+`active`. `pan` and `rc` are forced to 0 when !active, so sampl, sampr, rc0 and
+rc1 are all exactly 0 and the four accumulator updates collapse to a plain
+sx20() of the accumulator.
+
+Two things do still happen and are reproduced: calc_tv<2>() keeps stepping the
+filter envelope in ram2[11] -- `write` is unconditionally set by !active, so a
+silent slot's filter level keeps moving -- and the chorus/reverb rcadd and
+rcadd2 injections are selected by slot position, not by whether the slot is
+sounding.
+
+Three exclusions, all found by the differential test rather than by reading:
+
+  * pcm.nfs must be set, because the clear of ram1[1..5] is gated on it;
+  * slots 28..31 always take the full path. Their register rows double as the
+    mixer and chorus/reverb state -- ram1[28][*] and ram1[29][*] are the reverb
+    line's working registers, ram1[30][*] is the DAC stage, ram1[31][1] and
+    ram1[31][3] are the mix accumulators -- so the filter's `ram1[1] = v5` and
+    `ram1[3] = v1` writes are not dead for them, they clobber shared state the
+    next stage reads back;
+  * slot nslots-1 always takes the full path, because it stores to
+    pcm.accum_l/accum_r rather than back into ram1[31], and its slot2 is 31.
+    reg_slots is 1..32, so this is not always slot 31.
+
+WHETHER TO TAKE THIS PATCH IS A JUDGEMENT CALL. It is a large win when voices
+are idle and a small loss when they are not, and the loss lands on the case that
+decides whether the emulator keeps up. On the ROM-free harness, on top of 0001
+to 0005:
+
+  all 32 voices keyed on      27741 -> 28284 Ir/tick   +2.0%   (worst case)
+  same, wide pitch spread     28899 -> 29442 Ir/tick   +1.9%
+  mixed key traffic           25727 -> 12491 Ir/tick   -51%
+  all voices idle             24842 ->  7279 Ir/tick   -71%
+
+The +2% is the extra live range the fast path forces on the main body; it does
+not go away with branch hints or a running mask, both of which were tried.
+
+Note also that the sc55d --bench figure for this patch is meaningless: with
+placeholder ROMs no voice is ever keyed on, so the benchmark measures nothing
+but the fast path.
+
+--- a/src/backend/pcm.cpp
++++ b/src/backend/pcm.cpp
+@@ -1093,6 +1093,16 @@
+         pcm.rcsum[1] = 0;
+ 
+         const int nslots = pcm.config.reg_slots;
++
++        // Bitmap of the slots whose whole body is dead this tick; see the
++        // fast path inside the loop for why.  Slots 28..31 are excluded because
++        // their register rows are shared with the mixer and the chorus/reverb
++        // line, and slot nslots-1 is excluded because it is the one that writes
++        // the accumulators out to pcm.accum_l / pcm.accum_r.
++        const uint32_t slot_fast = pcm.nfs
++            ? (~voice_active & 0x0fffffffu & ~(1u << (nslots - 1)))
++            : 0u;
++
+         for (int slot = 0; slot < nslots; slot++)
+         {
+             uint32_t *ram1 = pcm.ram1[slot];
+@@ -1103,6 +1113,95 @@
+             const bool active = okey && key;
+             const bool kon = key && !okey;
+ 
++            // Fast path for a slot whose key bit is clear.
++            //
++            // Everything the main body computes for such a slot is either
++            // discarded or overwritten by the `if (!active)` clear at the bottom
++            // of the loop:
++            //
++            //   ram1[4]                     written only when `active`
++            //   ram1[1], ram1[3], ram1[5]   zeroed by the clear (needs nfs)
++            //   ram2[8], ram2[9], ram2[10]  zeroed by the clear
++            //   ram2[7]                     written only when `key`
++            //   the IRQ                     raised only when `active`
++            //
++            // and `pan` and `rc` are forced to 0 when !active, so sampl, sampr,
++            // rc0 and rc1 are all exactly 0 and the four accumulator updates
++            // degenerate to a plain sx20() of the accumulator.  Two things do
++            // still happen and are reproduced below: calc_tv<2>() keeps stepping
++            // the filter envelope in ram2[11], and the chorus/reverb rcadd and
++            // rcadd2 injections are selected by slot position, not by whether
++            // the slot is sounding.
++            //
++            // `pcm.nfs` is part of the slot_fast condition because the clear of
++            // ram1[1..5] is itself gated on it.  Slots 28..31 are excluded there
++            // too: their register rows double as the mixer and chorus/reverb
++            // state - ram1[28][*] and ram1[29][*] are the reverb line's working
++            // registers, ram1[30][*] is the DAC stage, ram1[31][1] and
++            // ram1[31][3] are the left/right mix accumulators - so for those the
++            // filter's `ram1[1] = v5` and `ram1[3] = v1` writes are not dead at
++            // all, they clobber shared state the next stage reads back.  Slot
++            // nslots-1 is excluded because it stores to pcm.accum_l/accum_r
++            // rather than back into ram1[31], and because its slot2 is 31.
++            //
++            // The body is written out separately rather than as a branch inside
++            // the main path so that the all-voices-active case, which is the one
++            // that decides whether the emulator keeps up, sees exactly the same
++            // code and the same register allocation as before.
++            if ((slot_fast >> slot) & 1)
++            {
++                calc_tv<2>(pcm, taps, ram2[5], &ram2[11], /*active=*/0, NULL);
++
++                // slot2 is slot + 1 here: slot != nslots - 1, and slot < 28,
++                // so case 31 is unreachable.  Same single mask test and merged
++                // switch as the main path uses.
++                if ((0x00e60000u >> (slot + 1)) & 1)
++                {
++                    switch (slot + 1)
++                    {
++                        case 17:
++                            pcm.ram1[31][1] = (uint32_t)addclip20((int32_t)pcm.ram1[31][1], rcadd[0] >> 1, rcadd[0] & 1);
++                            pcm.rcsum[1] = addclip20(pcm.rcsum[1], rcadd2[0] >> 1, rcadd2[0] & 1);
++                            break;
++                        case 18:
++                            pcm.ram1[31][3] = (uint32_t)addclip20((int32_t)pcm.ram1[31][3], rcadd[1] >> 1, rcadd[1] & 1);
++                            pcm.rcsum[1] = addclip20(pcm.rcsum[1], rcadd2[1] >> 1, rcadd2[1] & 1);
++                            break;
++                        case 21:
++                            pcm.ram1[31][1] = (uint32_t)addclip20((int32_t)pcm.ram1[31][1], rcadd[2] >> 1, rcadd[2] & 1);
++                            pcm.rcsum[0] = addclip20(pcm.rcsum[0], rcadd2[2] >> 1, rcadd2[2] & 1);
++                            break;
++                        case 22:
++                            pcm.ram1[31][3] = (uint32_t)addclip20((int32_t)pcm.ram1[31][3], rcadd[3] >> 1, rcadd[3] & 1);
++                            pcm.rcsum[1] = addclip20(pcm.rcsum[1], rcadd2[3] >> 1, rcadd2[3] & 1);
++                            break;
++                        case 23:
++                            pcm.ram1[31][1] = (uint32_t)addclip20((int32_t)pcm.ram1[31][1], rcadd[4] >> 1, rcadd[4] & 1);
++                            pcm.rcsum[0] = addclip20(pcm.rcsum[0], rcadd2[4] >> 1, rcadd2[4] & 1);
++                            break;
++                    }
++                }
++
++                // addclip20(acc, 0, 0) == sx20(acc)
++                const int32_t suml = sx20((int32_t)pcm.ram1[31][1]);
++                const int32_t sumr = sx20((int32_t)pcm.ram1[31][3]);
++
++                pcm.rcsum[0] = sx20(pcm.rcsum[0]);
++                pcm.rcsum[1] = sx20(pcm.rcsum[1]);
++
++                // slot != nslots - 1, so the accumulators stay in ram1[31]
++                pcm.ram1[31][1] = (uint32_t)suml;
++                pcm.ram1[31][3] = (uint32_t)sumr;
++
++                ram1[1] = 0;
++                ram1[3] = 0;
++                ram1[5] = 0;
++                ram2[8] = 0;
++                ram2[9] = 0;
++                ram2[10] = 0;
++                continue;
++            }
++
+             // address generator
+ 
+             bool b15 = (ram2[8] & 0x8000) != 0; // 0

@@ -1,0 +1,12 @@
+MISMATCH mask=7 p1cr=00 ipr=005aff37 pend=000000 exc=0: pc 71fd/4321 sr 0700/0700 calls 0/0
+MISMATCH mask=7 p1cr=00 ipr=005aff37 pend=000000 exc=1: pc 46e9/4321 sr 0700/0700 calls 0/0
+MISMATCH mask=7 p1cr=00 ipr=005aff37 pend=000000 exc=2: pc a274/4321 sr 0700/0700 calls 0/0
+MISMATCH mask=7 p1cr=00 ipr=005aff37 pend=000001 exc=0: pc 71fd/4321 sr 0700/0700 calls 0/0
+MISMATCH mask=7 p1cr=00 ipr=005aff37 pend=000001 exc=1: pc 46e9/4321 sr 0700/0700 calls 0/0
+MISMATCH mask=7 p1cr=00 ipr=005aff37 pend=000001 exc=2: pc a274/4321 sr 0700/0700 calls 0/0
+MISMATCH mask=7 p1cr=00 ipr=005aff37 pend=000002 exc=0: pc 71fd/4321 sr 0700/0700 calls 0/0
+MISMATCH mask=7 p1cr=00 ipr=005aff37 pend=000002 exc=1: pc 46e9/4321 sr 0700/0700 calls 0/0
+MISMATCH mask=7 p1cr=00 ipr=005aff37 pend=000002 exc=2: pc a274/4321 sr 0700/0700 calls 0/0
+MISMATCH mask=7 p1cr=00 ipr=005aff37 pend=000004 exc=0: pc 71fd/4321 sr 0700/0700 calls 0/0
+checked 7700480 interrupt-handler states
+FAIL: 721920 mismatches

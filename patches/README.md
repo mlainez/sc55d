@@ -51,46 +51,81 @@ too.
 
 ## Patches
 
-| Patch | Effect | Status |
-|---|---|---|
-| `0001-mcu_timer-closed-form-advancement.patch` | `TIMER_Clock()` walks one cycle at a time applying ticks that change nothing — 55M ticks produced 1561 events in a measured run. Defers the counters and schedules the next event in closed form. | `TIMER_Clock` 2295M → 38M retired instructions; whole program 7865M → 5608M. Worst case on a microbenchmark with timers actually programmed: 691 → 184 Ir/call. **Differential test + 9/9 mutants; real-ROM audio unchecked.** |
-| `0002-rom_io-table-driven-unscramble.patch` | `unscramble()` rebuilds two fixed bit permutations a bit at a time per byte — ~28 tests over 2–3 MB of wave ROM. Precomputes 8.25 KiB of tables. | 5.1x faster startup. **Equivalence proved exhaustively.** |
+Applied in order. Together they take the 32-slot benchmark from **7,864M to
+4,320M retired instructions, −45.1%** — and that *understates* them, because
+with placeholder ROMs no voice is ever keyed on, so the PCM patches barely
+register.
 
-See also [`candidates/`](candidates/) for patches that are correct but whose
-value cannot be established without real ROMs, and which no build applies.
+| # | Patch | Effect |
+|---|---|---|
+| 0001 | `mcu_timer-closed-form-advancement` | Defers the counters, schedules the next event in closed form. `TIMER_Clock` **2295M → 38M**. |
+| 0002 | `rom_io-table-driven-unscramble` | Two fixed bit permutations into 8.25 KiB of tables. **5.1x faster startup**. |
+| 0003 | `mcu-code-fetch-fast-path` | ROM cases answered in the header. −0.36%, **better on real ROMs**. |
+| 0004 | `mcu_step-hoist-fixed-work` | `has_submcu` decided once; ADCSR tested at the call site. −0.96%. |
+| 0005 | `mcu_interrupt-skip-fully-masked-scan` | Early return when the mask is 7. −2.64% here, **but that is an artefact**. |
+| 0006 | `mcu-hot-field-layout` | Per-instruction fields into the first 336 bytes of `mcu_t`. **−5 instructions per emulated instruction on AArch64**; ~0 on x86. |
+| 0007 | `pcm-hot-field-layout` | `enable_oversampling` sat at offset 15,763,532, past 15 MB of wave ROM, alone in a cache line, read once per sample. |
+| 0008 | `pcm-hoist-calc-tv-per-tick-invariants` | Per-tick tap table + 256-byte type table instead of 97 recomputations per tick. |
+| 0009 | `pcm-fold-address-step-boolean-algebra` | The address step is `0/−1/+1` with a per-slot sign; `reg_slots` hoisted. |
+| 0010 | `pcm-template-calc-tv-on-the-envelope-index` | `e` is a literal at all four sites; `e==2` drops its dead half. |
+| 0011 | `pcm-gate-reverb-injection-switches` | Only 6 of 32 slots inject. Two indirect jumps per slot become one predictable test — **worth more than its instruction count on an in-order A53**. |
+| 0012 | `pcm-skip-dead-fourth-address-step` | Below the `sub_phase_of` threshold the tail *and one of five wave ROM reads* are dead. |
+
+0008–0012 together are **−21.0% of PCM per tick** with all 32 voices on, and
+between −19.7% and −22.7% across every activity level — they do not depend on
+how busy the synth is, which is why they are trusted despite the benchmark
+being idle.
+
+**Two numbers not to budget for.** 0005's −2.64% is an artefact: the
+placeholder firmware never lowers `sr` from 0x700, so the guard fires on every
+instruction where real firmware would lower the mask early. The guard is one
+instruction, so its worst case is a ~0.08% loss. And the whole-program figure
+above is measured on an idle synth.
 
 ### Proofs
 
-Both have ROM-free tests, because both transformations are decidable without
-audio:
+Every patch has a ROM-free test:
 
 ```bash
 g++ -O2 -std=c++23 -o /tmp/ut patches/tests/unscramble_equivalence.cpp && /tmp/ut
 ./patches/tests/timer_closed_form/run.sh
+./patches/tests/mcu/run.sh
+./patches/tests/pcm/run.sh
 ```
 
-- `unscramble_equivalence` checks all 256 data bytes and all 8388608 addresses
-  against the original loops.
-- `timer_closed_form/` builds the core's real `mcu_timer.cpp` **twice in one
-  program** — upstream in namespace `ref`, patched in `neu` — and drives both
-  through the same operations, comparing `timer.cycles`, the interrupt bitset
-  and every byte read back through the public accessors. 9.6M operations over
-  480 randomised runs, zero mismatches. Field-by-field comparison would be
-  wrong: the patch deliberately leaves counters stale and syncs on demand, so
-  what is claimed is *observational* equivalence.
+- **unscramble** — all 256 data bytes, all 8388608 addresses.
+- **timer** — the real `mcu_timer.cpp` built twice in one program, upstream in
+  namespace `ref` and patched in `neu`, compared after each of 9.6M operations.
+  Field comparison would be wrong: the patch deliberately leaves counters stale
+  and syncs on demand, so the claim is *observational* equivalence.
+- **mcu** — the fetch fast path against the **real `MCU_Read`** over
+  188,743,680 `(cp, pc)` × romset × `rom2_mask` combinations, comparing the
+  return value, the log of outward calls *and* every scalar in `mcu_t`, so
+  short-circuiting an address that latches the button matrix would be caught.
+  Plus `mcu_interrupt.cpp` compiled twice over 7,700,480 machine states.
+- **pcm** — `pcm.cpp` built twice into a driver that digests the **entire**
+  mutable PCM state each tick (ram1, ram2, all 16 KiB of eram, every scalar),
+  every sample posted and every interrupt raised. 44 cases over 10 modes,
+  including two wide-pitch modes added specifically because the stock ones only
+  drive `sub_phase_of` to 0..1 and would have left 0012's branch untested.
 
-Both suites are known to be capable of failing. `timer_mutants.sh` breaks the
-patched timer nine ways — overshooting the bound, ignoring clear-on-match,
-dropping the overflow event, failing to sync before a register read — and all
-nine are caught.
+All four suites are known to be capable of failing — 9 mutants for the timer,
+7 deliberate mistakes for the MCU series, 4 for PCM, 7 for the sub-MCU
+candidate, all detected. The PCM runner additionally refuses to run if a patch
+fails to apply or if the "patched" source turns out identical to the pristine
+one, because an early version of it silently compared pristine against
+pristine and passed.
 
-There is one further piece of evidence for 0001 worth knowing about. On the
-placeholder-ROM profile, **every other function in the emulator retires a
-bit-identical instruction count**: `PCM_Update` 2,216,305,770 in both,
-`SM_Update` 905,602,761, `MCU_Interrupt_Handle` 320,207,643, `calc_tv`,
-`PCM_ReadROM`, `MCU_Read`, `SM_Read` all unchanged to the instruction. The
-emulated MCU executed exactly the same instruction stream. That is not proof
-across all ROMs, but it is a great deal stronger than a digest of silence.
+### The strongest evidence available without ROMs
+
+Call counts over 6,388,732 emulated instructions are **identical** between
+unpatched and fully patched: `PCM_ReadROM` 14,868,480, `Diag_Printf`
+11,612,931, `SM_Read` 7,993,725, and `PCM_Update`, `TIMER_Clock`, `SM_Update`,
+`MCU_Interrupt_Handle`, `MCU_Operand_Nop`, `calc_tv` all to the call. Only the
+two intended differences appear. The emulated machine follows the same
+trajectory. The PCM patches were additionally cross-compiled for
+`-mcpu=cortex-a53` and run under qemu, producing output identical to x86-64
+across all 10 modes.
 
 ### Two mistakes worth not repeating
 

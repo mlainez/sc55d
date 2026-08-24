@@ -1,0 +1,35 @@
+mcu_interrupt: do not scan pending sources when everything is masked
+
+MCU_Interrupt_Handle() runs on every emulated instruction and ends by walking
+every pending interrupt source, calling MCU_Interrupt_GetVL() on each, to find
+one whose priority level outranks the CPU's interrupt mask.  Both are three-bit
+values and the test is `mask < level`, so a mask of 7 cannot be outranked by
+anything: the scan is guaranteed to find nothing and fall out of the bottom.
+Returning early is an identity, not a heuristic.
+
+Measured (callgrind Ir, mk2, 32 PCM slots, placeholder ROMs), on top of 0002:
+7,761,848,566 -> 7,556,638,426, -2.64%.
+
+READ THAT NUMBER WITH CARE.  It is almost entirely an artefact of the
+placeholder ROMs: the fake firmware never lowers sr from its reset value of
+0x700, so the mask is 7 for the whole run, and it never services the two timer
+interrupts that are consequently stuck pending, so the scan it skips is 1.7
+sources long every single instruction.  Real firmware lowers the mask early and
+clears what it services.  What survives the caveat is only that the guard is
+one instruction, is exact, and can never cost more than it saves.
+
+Proof: patches/tests/mcu_interrupt_mask_guard_equivalence.cpp.
+
+--- a/src/backend/mcu_interrupt.cpp
++++ b/src/backend/mcu_interrupt.cpp
+@@ -215,6 +215,10 @@
+         return;
+     }
+     uint32_t mask = (mcu.sr >> 8) & 7;
++    // Every level below is three bits, so nothing can outrank a mask of 7 and
++    // the scan below cannot dispatch. Skipping it is exact, not a heuristic.
++    if (mask >= 7)
++        return;
+     for (MCU_Interrupt_Source source : mcu.interrupt_pending)
+     {
+         int32_t vector = -1;

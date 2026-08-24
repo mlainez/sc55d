@@ -1,0 +1,112 @@
+pcm: gate the two reverb-injection switches on one mask test
+
+The voice loop runs two `switch (slot2)` statements per slot, and only six of
+the 32 slot positions -- 17, 18, 21, 22, 23 and 31 -- inject anything at all.
+Both become one test against a constant mask, with the two bodies merged: the
+second switch only touches pcm.rcsum, nothing between the two positions reads or
+writes pcm.rcsum, and suml/sumr depend only on ram1[31][1] and ram1[31][3], so
+merging them does not reorder anything observable.
+
+Worth having on an in-order core for more than the instruction count: it turns
+two indirect jumps per slot, 64 per tick, into two predictable not-taken
+branches, which is not something a retired-instruction count shows.
+
+Measured on the ROM-free voice-loop harness, all 32 voices keyed on:
+29751 -> 29577 Ir per tick (-0.6%).
+
+--- a/src/backend/pcm.cpp
++++ b/src/backend/pcm.cpp
+@@ -1453,56 +1453,51 @@
+             int rc1 = multi(sample3, (int8_t)((rc >> 0) & 255)) >> 5; // chorus
+             
+             // mix reverb/chorus?
++            //
++            // Only six of the 32 slot positions inject anything, so both
++            // switches are skipped wholesale with one test on a constant mask
++            // (bits 17, 18, 21, 22, 23 and 31) instead of running a jump table
++            // twice per slot.  The second switch is merged into the first: it
++            // only touches pcm.rcsum, nothing between the two positions reads or
++            // writes pcm.rcsum, and suml/sumr depend only on ram1[31][1] and
++            // ram1[31][3], so the reordering is not observable.
+             int slot2 = (slot == nslots - 1) ? 31 : slot + 1;
+-            switch (slot2)
++            if ((0x80e60000u >> slot2) & 1)
+             {
+-                // 17, 18 - reverb
++                switch (slot2)
++                {
++                    // 17, 18 - reverb
+ 
+-                case 17:
+-                    pcm.ram1[31][1] = (uint32_t)addclip20((int32_t)pcm.ram1[31][1], rcadd[0] >> 1, rcadd[0] & 1);
+-                    break;
+-                case 18:
+-                    pcm.ram1[31][3] = (uint32_t)addclip20((int32_t)pcm.ram1[31][3], rcadd[1] >> 1, rcadd[1] & 1);
+-                    break;
+-                case 21:
+-                    pcm.ram1[31][1] = (uint32_t)addclip20((int32_t)pcm.ram1[31][1], rcadd[2] >> 1, rcadd[2] & 1);
+-                    break;
+-                case 22:
+-                    pcm.ram1[31][3] = (uint32_t)addclip20((int32_t)pcm.ram1[31][3], rcadd[3] >> 1, rcadd[3] & 1);
+-                    break;
+-                case 23:
+-                    pcm.ram1[31][1] = (uint32_t)addclip20((int32_t)pcm.ram1[31][1], rcadd[4] >> 1, rcadd[4] & 1);
+-                    break;
+-                case 31:
+-                    pcm.ram1[31][3] = (uint32_t)addclip20((int32_t)pcm.ram1[31][3], rcadd[5] >> 1, rcadd[5] & 1);
+-                    break;
++                    case 17:
++                        pcm.ram1[31][1] = (uint32_t)addclip20((int32_t)pcm.ram1[31][1], rcadd[0] >> 1, rcadd[0] & 1);
++                        pcm.rcsum[1] = addclip20(pcm.rcsum[1], rcadd2[0] >> 1, rcadd2[0] & 1);
++                        break;
++                    case 18:
++                        pcm.ram1[31][3] = (uint32_t)addclip20((int32_t)pcm.ram1[31][3], rcadd[1] >> 1, rcadd[1] & 1);
++                        pcm.rcsum[1] = addclip20(pcm.rcsum[1], rcadd2[1] >> 1, rcadd2[1] & 1);
++                        break;
++                    case 21:
++                        pcm.ram1[31][1] = (uint32_t)addclip20((int32_t)pcm.ram1[31][1], rcadd[2] >> 1, rcadd[2] & 1);
++                        pcm.rcsum[0] = addclip20(pcm.rcsum[0], rcadd2[2] >> 1, rcadd2[2] & 1);
++                        break;
++                    case 22:
++                        pcm.ram1[31][3] = (uint32_t)addclip20((int32_t)pcm.ram1[31][3], rcadd[3] >> 1, rcadd[3] & 1);
++                        pcm.rcsum[1] = addclip20(pcm.rcsum[1], rcadd2[3] >> 1, rcadd2[3] & 1);
++                        break;
++                    case 23:
++                        pcm.ram1[31][1] = (uint32_t)addclip20((int32_t)pcm.ram1[31][1], rcadd[4] >> 1, rcadd[4] & 1);
++                        pcm.rcsum[0] = addclip20(pcm.rcsum[0], rcadd2[4] >> 1, rcadd2[4] & 1);
++                        break;
++                    case 31:
++                        pcm.ram1[31][3] = (uint32_t)addclip20((int32_t)pcm.ram1[31][3], rcadd[5] >> 1, rcadd[5] & 1);
++                        pcm.rcsum[1] = addclip20(pcm.rcsum[1], rcadd2[5] >> 1, rcadd2[5] & 1);
++                        break;
++                }
+             }
+ 
+             int32_t suml = addclip20((int32_t)pcm.ram1[31][1], sampl >> 6, (sampl >> 5) & 1);
+             int32_t sumr = addclip20((int32_t)pcm.ram1[31][3], sampr >> 6, (sampr >> 5) & 1);
+ 
+-            switch (slot2)
+-            {
+-                case 17:
+-                    pcm.rcsum[1] = addclip20(pcm.rcsum[1], rcadd2[0] >> 1, rcadd2[0] & 1);
+-                    break;
+-                case 18:
+-                    pcm.rcsum[1] = addclip20(pcm.rcsum[1], rcadd2[1] >> 1, rcadd2[1] & 1);
+-                    break;
+-                case 21:
+-                    pcm.rcsum[0] = addclip20(pcm.rcsum[0], rcadd2[2] >> 1, rcadd2[2] & 1);
+-                    break;
+-                case 22:
+-                    pcm.rcsum[1] = addclip20(pcm.rcsum[1], rcadd2[3] >> 1, rcadd2[3] & 1);
+-                    break;
+-                case 23:
+-                    pcm.rcsum[0] = addclip20(pcm.rcsum[0], rcadd2[4] >> 1, rcadd2[4] & 1);
+-                    break;
+-                case 31:
+-                    pcm.rcsum[1] = addclip20(pcm.rcsum[1], rcadd2[5] >> 1, rcadd2[5] & 1);
+-                    break;
+-            }
+-
+             pcm.rcsum[0] = addclip20(pcm.rcsum[0], rc0 >> 1, rc0 & 1);
+             pcm.rcsum[1] = addclip20(pcm.rcsum[1], rc1 >> 1, rc1 & 1);
+ 

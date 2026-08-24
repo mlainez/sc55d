@@ -1,0 +1,57 @@
+pcm: make calc_tv's envelope index a template parameter
+
+`e` is a literal at all four call sites (1, 0, 1, 2) and selects which envelope
+is being stepped, but it is passed as a runtime argument, so gcc emits one
+out-of-line .constprop clone that all the e == 2 calls share -- 2.97M calls in a
+0.4s benchmark, each paying a call, a prologue and an epilogue for a body whose
+volmul half is dead. e == 2 passes volmul == NULL and needs none of that
+arithmetic, and its `e != 2 || active` tests collapse to `active`.
+
+Making `e` a template parameter lets each instantiation drop its dead half. Two
+uses of the intermediates `w1` and `w2`, which patch 0001 removed in favour of
+the packed type table, are re-derived in place: w2 is type bit 0 and w1 is
+(speed & 0xf0) == 0.
+
+Measured on the ROM-free voice-loop harness, all 32 voices keyed on:
+31543 -> 29751 Ir per tick (-5.7%). Static size of PCM_Update on aarch64 grows
+7700 -> 8060 bytes, which is nothing against a 32 KiB I-cache.
+
+--- a/src/backend/pcm.cpp
++++ b/src/backend/pcm.cpp
+@@ -381,7 +381,13 @@
+     t.write[4]  = 1;
+ }
+ 
+-inline void calc_tv(pcm_t& pcm, const tv_taps& taps, int e, int adjust, uint16_t *levelcur, int active, int *volmul)
++// `e` selects which of the three envelopes is being stepped and is a literal at
++// every call site.  Making it a template parameter lets the compiler drop the
++// dead half of the function per instantiation - in particular the e == 2 case,
++// which is called once per voice slot with volmul == NULL and therefore needs
++// none of the volmul arithmetic at all.
++template <int e>
++inline void calc_tv(pcm_t& pcm, const tv_taps& taps, int adjust, uint16_t *levelcur, int active, int *volmul)
+ {
+     // int adjust = ram2[3+e];
+     // int levelcur = ram2[9+e] & 0x7fff;
+@@ -668,7 +674,7 @@
+             const bool key = 1;
+             const bool active = okey && key;
+             int u = 0;
+-            calc_tv(pcm, taps, 1, pcm.ram2[30][0], &pcm.ram2[30][9], active, &u);
++            calc_tv<1>(pcm, taps, pcm.ram2[30][0], &pcm.ram2[30][9], active, &u);
+         }
+ 
+         {
+@@ -1417,9 +1423,9 @@
+             int volmul1 = 0;
+             int volmul2 = 0;
+ 
+-            calc_tv(pcm, taps, 0, ram2[3], &ram2[9], active, &volmul1);
+-            calc_tv(pcm, taps, 1, ram2[4], &ram2[10], active, &volmul2);
+-            calc_tv(pcm, taps, 2, ram2[5], &ram2[11], active, NULL);
++            calc_tv<0>(pcm, taps, ram2[3], &ram2[9], active, &volmul1);
++            calc_tv<1>(pcm, taps, ram2[4], &ram2[10], active, &volmul2);
++            calc_tv<2>(pcm, taps, ram2[5], &ram2[11], active, NULL);
+ 
+             // if (volmul1 && volmul2)
+             //     volmul1 += 0;

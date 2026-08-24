@@ -1,0 +1,240 @@
+pcm: hoist calc_tv's per-tick invariants out of the voice loop
+
+calc_tv() runs 97 times per PCM tick -- three per voice slot plus one for the
+pseudo-slot 31 chorus/reverb envelope -- and at 31% of everything pcm.cpp
+retires it is the single most expensive thing in the file. Two of the things it
+recomputes on every one of those calls do not vary per slot:
+
+  * `addlow`, a four-bit reversal of four bits tapped out of pcm.tv_counter,
+    selected by `type & 4` and then `type & 3`, and
+  * the counter half of the `write` enable, from the same counter.
+
+pcm.tv_counter is written exactly once per tick, immediately before the chorus/
+reverb stage, and pcm.nfs is written once per tick at the very end, so within a
+tick there are only five distinct (addlow, write) pairs. Compute all five once
+per tick into a five-entry table and index it.
+
+`type` itself, and which of the five taps it selects, are a pure function of the
+8-bit `speed` field plus pcm.nfs -- and nfs only ever clears one bit of it. That
+is a 256-byte compile-time table, built by the same expressions it replaces.
+
+This is the third lookup table tried in this core and the first that is faster.
+patches/README.md records why the PCM_ReadROM one lost: it replaced perfectly
+predictable branches with a dependent load. This one replaces about ten
+straight-line ALU operations with one load out of a 256-byte table that every
+tick touches 97 times, so it is never anywhere but L1.
+
+Measured on the ROM-free voice-loop harness, all 32 voices keyed on:
+35098 -> 32458 Ir per tick (-7.5%). Splitting the two halves: the per-tick tap
+table is worth 1748 Ir/tick and the `type` table a further 892.
+
+--- a/src/backend/pcm.cpp
++++ b/src/backend/pcm.cpp
+@@ -320,7 +320,68 @@
+     },
+ };
+ 
+-inline void calc_tv(pcm_t& pcm, int e, int adjust, uint16_t *levelcur, int active, int *volmul)
++// `type` and the tap selector are a pure function of the 8-bit `speed` field
++// and of pcm.nfs, which only ever clears bit 3.  256 bytes, built at compile
++// time from the same expressions it replaces.
++struct calc_tv_type_lut_t
++{
++    uint8_t v[256];
++    constexpr calc_tv_type_lut_t() : v()
++    {
++        for (int speed = 0; speed < 256; speed++)
++        {
++            const bool w1 = (speed & 0xf0) == 0;
++            const bool w2 = w1 || (speed & 0x10) != 0;
++            const bool w3 = ((speed & 0x80) == 0
++                             || ((speed & 0x40) == 0 && (!w2 || (speed & 0x20) == 0)));
++            int type = (int)w2 | ((int)w3 << 3);
++            if (speed & 0x20)
++                type |= 2;
++            if ((speed & 0x80) == 0 || (speed & 0x40) == 0)
++                type |= 4;
++            const int sel = (type & 4) ? 4 : (type & 3);
++            v[speed] = (uint8_t)(type | (sel << 4));
++        }
++    }
++};
++static constexpr calc_tv_type_lut_t calc_tv_type_lut{};
++
++// Per-tick invariants of calc_tv().
++//
++// calc_tv() is called 97 times per PCM tick (3 per voice slot, plus one for the
++// pseudo-slot 31 chorus/reverb envelope).  Two of the things it computes do not
++// depend on the slot at all:
++//
++//   * `addlow`, a four-bit reversal of four bits tapped out of pcm.tv_counter,
++//   * the counter half of the `write` enable,
++//
++// and both depend on `type` only through a five-way selector: `type & 4` picks
++// one tap set, otherwise `type & 3` picks one of four more.  pcm.tv_counter is
++// updated exactly once per tick, so all five (addlow, write) pairs can be
++// computed once a tick and indexed instead of recomputed 97 times.
++struct tv_taps
++{
++    uint8_t addlow[5];
++    uint8_t write[5];
++};
++
++inline void tv_taps_compute(tv_taps& t, uint32_t c)
++{
++    // bit-reversed four-bit taps; the shifts below mirror the original
++    // `if (counter & bit) addlow |= n;` ladders exactly.
++    t.addlow[0] = (uint8_t)(((c >> 5) & 1) | (((c >> 4) & 1) << 1) | (((c >> 3) & 1) << 2) | (((c >> 2) & 1) << 3));
++    t.addlow[1] = (uint8_t)(((c >> 7) & 1) | (((c >> 6) & 1) << 1) | (((c >> 5) & 1) << 2) | (((c >> 4) & 1) << 3));
++    t.addlow[2] = (uint8_t)(((c >> 9) & 1) | (((c >> 8) & 1) << 1) | (((c >> 7) & 1) << 2) | (((c >> 6) & 1) << 3));
++    t.addlow[3] = (uint8_t)(((c >> 11) & 1) | (((c >> 10) & 1) << 1) | (((c >> 9) & 1) << 2) | (((c >> 8) & 1) << 3));
++    t.addlow[4] = (uint8_t)(((c >> 3) & 1) | (((c >> 2) & 1) << 1) | (((c >> 1) & 1) << 2) | (((c >> 0) & 1) << 3));
++    t.write[0]  = (uint8_t)((c & 3) == 0);
++    t.write[1]  = (uint8_t)((c & 15) == 0);
++    t.write[2]  = (uint8_t)((c & 63) == 0);
++    t.write[3]  = (uint8_t)((c & 127) == 0);
++    t.write[4]  = 1;
++}
++
++inline void calc_tv(pcm_t& pcm, const tv_taps& taps, int e, int adjust, uint16_t *levelcur, int active, int *volmul)
+ {
+     // int adjust = ram2[3+e];
+     // int levelcur = ram2[9+e] & 0x7fff;
+@@ -329,82 +390,11 @@
+     int target = (adjust >> 8) & 0xff;
+ 
+                 
+-    const bool w1 = (speed & 0xf0) == 0;
+-    const bool w2 = w1 || (speed & 0x10) != 0;
+-    const bool w3 = pcm.nfs &&
+-        ((speed & 0x80) == 0 || ((speed & 0x40) == 0 && (!w2 || (speed & 0x20) == 0)));
+-
+-    int type = (int)w2 | ((int)w3 << 3);
+-    if (speed & 0x20)
+-        type |= 2;
+-    if ((speed & 0x80) == 0 || (speed & 0x40) == 0)
+-        type |= 4;
+-
+-
+-    bool write = !active;
+-    int addlow = 0;
+-    if (type & 4)
+-    {
+-        if (pcm.tv_counter & 8)
+-            addlow |= 1;
+-        if (pcm.tv_counter & 4)
+-            addlow |= 2;
+-        if (pcm.tv_counter & 2)
+-            addlow |= 4;
+-        if (pcm.tv_counter & 1)
+-            addlow |= 8;
+-        write |= 1;
+-    }
+-    else
+-    {
+-        switch (type & 3)
+-        {
+-        case 0:
+-            if (pcm.tv_counter & 0x20)
+-                addlow |= 1;
+-            if (pcm.tv_counter & 0x10)
+-                addlow |= 2;
+-            if (pcm.tv_counter & 8)
+-                addlow |= 4;
+-            if (pcm.tv_counter & 4)
+-                addlow |= 8;
+-            write |= (pcm.tv_counter & 3) == 0;
+-            break;
+-        case 1:
+-            if (pcm.tv_counter & 0x80)
+-                addlow |= 1;
+-            if (pcm.tv_counter & 0x40)
+-                addlow |= 2;
+-            if (pcm.tv_counter & 0x20)
+-                addlow |= 4;
+-            if (pcm.tv_counter & 0x10)
+-                addlow |= 8;
+-            write |= (pcm.tv_counter & 15) == 0;
+-            break;
+-        case 2:
+-            if (pcm.tv_counter & 0x200)
+-                addlow |= 1;
+-            if (pcm.tv_counter & 0x100)
+-                addlow |= 2;
+-            if (pcm.tv_counter & 0x80)
+-                addlow |= 4;
+-            if (pcm.tv_counter & 0x40)
+-                addlow |= 8;
+-            write |= (pcm.tv_counter & 63) == 0;
+-            break;
+-        case 3:
+-            if (pcm.tv_counter & 0x800)
+-                addlow |= 1;
+-            if (pcm.tv_counter & 0x400)
+-                addlow |= 2;
+-            if (pcm.tv_counter & 0x200)
+-                addlow |= 4;
+-            if (pcm.tv_counter & 0x100)
+-                addlow |= 8;
+-            write |= (pcm.tv_counter & 127) == 0;
+-            break;
+-        }
+-    }
++    const int packed = calc_tv_type_lut.v[speed];
++    const int type = pcm.nfs ? (packed & 15) : (packed & 7);
++    const int sel = packed >> 4;
++    const int addlow = taps.addlow[sel];
++    const bool write = !active || taps.write[sel] != 0;
+ 
+     if ((type & 8) == 0)
+     {
+@@ -438,7 +428,7 @@
+     else
+     {
+         int shift = (speed >> 4) & 14;
+-        shift |= (int)w2;
++        shift |= type & 1;              // type bit 0 is w2
+         shift = (10 - shift) & 15;
+ 
+         int sum1 = target << 11; // 5
+@@ -446,7 +436,7 @@
+             sum1 -= (*levelcur << 4); // 6
+         const bool neg = (sum1 & 0x80000) != 0;
+         int preshift = (speed & 15) << 9;
+-        if (!w1)
++        if ((speed & 0xf0) != 0)        // !w1
+             preshift |= 0x2000;
+         if (neg)
+             preshift ^= ~0x3f;
+@@ -647,6 +637,9 @@
+             pcm.tv_counter &= 0x3fff;
+         }
+ 
++        tv_taps taps;
++        tv_taps_compute(taps, pcm.tv_counter);
++
+         // chorus/reverb
+ 
+         { // fixme
+@@ -675,7 +668,7 @@
+             const bool key = 1;
+             const bool active = okey && key;
+             int u = 0;
+-            calc_tv(pcm, 1, pcm.ram2[30][0], &pcm.ram2[30][9], active, &u);
++            calc_tv(pcm, taps, 1, pcm.ram2[30][0], &pcm.ram2[30][9], active, &u);
+         }
+ 
+         {
+@@ -1442,9 +1435,9 @@
+             int volmul1 = 0;
+             int volmul2 = 0;
+ 
+-            calc_tv(pcm, 0, ram2[3], &ram2[9], active, &volmul1);
+-            calc_tv(pcm, 1, ram2[4], &ram2[10], active, &volmul2);
+-            calc_tv(pcm, 2, ram2[5], &ram2[11], active, NULL);
++            calc_tv(pcm, taps, 0, ram2[3], &ram2[9], active, &volmul1);
++            calc_tv(pcm, taps, 1, ram2[4], &ram2[10], active, &volmul2);
++            calc_tv(pcm, taps, 2, ram2[5], &ram2[11], active, NULL);
+ 
+             // if (volmul1 && volmul2)
+             //     volmul1 += 0;

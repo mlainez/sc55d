@@ -1,0 +1,13 @@
+has_submcu matches the predicate for all 9 romsets
+MISMATCH romset=0 adcsr=20 cycles=0 deadline=0: state DIFFER, calls 0/0
+MISMATCH romset=0 adcsr=21 cycles=0 deadline=0: state DIFFER, calls 0/0
+MISMATCH romset=0 adcsr=22 cycles=0 deadline=0: state DIFFER, calls 0/0
+MISMATCH romset=0 adcsr=23 cycles=0 deadline=0: state DIFFER, calls 0/0
+MISMATCH romset=0 adcsr=24 cycles=0 deadline=0: state DIFFER, calls 0/0
+MISMATCH romset=0 adcsr=25 cycles=0 deadline=0: state DIFFER, calls 0/0
+MISMATCH romset=0 adcsr=26 cycles=0 deadline=0: state DIFFER, calls 0/0
+MISMATCH romset=0 adcsr=27 cycles=0 deadline=0: state DIFFER, calls 0/0
+MISMATCH romset=0 adcsr=28 cycles=0 deadline=0: state DIFFER, calls 0/0
+MISMATCH romset=0 adcsr=29 cycles=0 deadline=0: state DIFFER, calls 0/0
+checked 645120 analog-gate states
+FAIL: 161280 mismatches
