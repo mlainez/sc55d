@@ -207,6 +207,60 @@ produces documentation, and whoever writes libEmuSC code works only from the
 documentation. That discipline is worth recording as it happens rather than
 reconstructing later.
 
+### "But independent work would look similar anyway"
+
+True, and worth being precise about, because it changes what the discipline is
+for.
+
+Two implementations of the same hardware behaviour do converge. There are only
+so many ways to write a cutoff lookup, and the ROM's tables are identical for
+everyone because they are the same tables. Similarity in small functions,
+constants and data layout is weak evidence of copying — functional constraints
+dictate most of it, and any competent assessment filters those out before
+comparing.
+
+What actually fingerprints copying is the other stuff: overall architecture and
+decomposition, naming, comments, and above all idiosyncratic choices — an
+unusual workaround, a quirk reproduced bug-for-bug, a variable named after
+something only the original author would call it. Those are not dictated by the
+hardware, so their presence needs explaining.
+
+The inference "we could not prove we did it differently, so the discipline is
+pointless" inverts what the discipline does. It is not a way to win an argument
+after the fact; it is (a) the means of genuinely not copying, which is the part
+that actually matters, and (b) the thing that *creates* the record that would
+otherwise not exist. Observation write-ups, trace logs, commit history and who
+had access to what are the evidence. Clean-room procedures exist precisely
+because absence of evidence is a bad position when the accusation arrives with
+a diff attached.
+
+The realistic failure mode is not a courtroom. It is libEmuSC's maintainer
+declining a contribution whose shape looks Nuked-derived — not because anyone
+proved anything, but because merely suspecting it puts their LGPL library at
+risk. That is a rational thing for them to do, and this community is already
+sensitive to it: nukeykt has declined relicensing requests, and upstream PR #51
+was closed over licence concerns with the contributor withdrawing.
+
+Note also that the risk is not symmetric. A hobbyist attracts no attention; a
+company with revenue is a different proposition, and this is exactly the class
+of issue that surfaces years later during due diligence rather than at the
+time.
+
+### When any of this actually matters
+
+Only on distribution. The MAME licence permits use and modification freely — it
+restricts selling and commercial activity. So:
+
+- **Personal box, never distributed** — read whatever you like. Nothing here
+  applies. Build the thing and enjoy it.
+- **Contributing to libEmuSC** — discipline required, because the maintainer's
+  licence integrity is on the line, not just ours.
+- **Anything Spin42 sells** — discipline required, and worth a lawyer's half
+  hour before starting rather than after.
+
+Deciding which of those three this is should come before any of the work
+above.
+
 **A cleaner oracle still: real hardware.** A physical SC-55mk2 recorded against
 the same test sequences sidesteps the licence question entirely, and is the
 unimpeachable reference. If one is available it should be the primary source,
