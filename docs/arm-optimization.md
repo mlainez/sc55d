@@ -199,6 +199,64 @@ bit-exactness risk, against maybe a third of the runtime, and the biggest single
 hotspot found so far (`TIMER_Clock`) is a scalar algorithmic fix worth 7–13% for
 25 lines.
 
+## JIT, virtualisation, and off-the-shelf CPU cores
+
+The instinct is right — interpreting a CPU is slow, and dynamic recompilation is
+the standard cure. The profile says it is aimed at the wrong quarter of the
+work.
+
+**With real ROMs, after the thirteen patches**, retired instructions divide
+roughly like this:
+
+| | share |
+|---|---|
+| `PCM_Update` + `PCM_ReadROM` — the PCM **sound chip** model | **~50%** |
+| sub-MCU interpreter (`SM_*`) | ~16% |
+| main MCU interpreter, memory and interrupts | ~6% |
+| `TIMER_Sync` | ~5% |
+| ROM hashing and unscrambling at startup | ~3% |
+
+**Only about a quarter of the work is CPU emulation at all.** Half of it is
+`PCM_Update`, which is not executing guest instructions — it is a gate-level
+model of a sound chip, stepping 32 voice slots 33103 times a second. There is
+no instruction stream there to translate. A JIT cannot touch it.
+
+So a *perfect, zero-cost* CPU recompiler caps out around 25%, and a realistic
+one — 3-5x on the interpreted part — saves perhaps 18%. The thirteen patches
+already delivered 43.5% for a fraction of the effort.
+
+**And the cycle coupling fights it.** `PCM_Update` and the timers are advanced
+to the current cycle count after *every* emulated instruction, and the MCU can
+write their registers on any instruction. A JIT block therefore cannot run
+free; it would have to emit calls back into the peripherals at instruction
+granularity, which is most of what makes a JIT fast thrown away. This is the
+same coupling that rules out GPU offload, below.
+
+**Virtualisation is not applicable at all**, and not because it is hard.
+Hardware virtualisation — KVM, HVF, Hyper-V — runs a guest *of the same
+instruction set* directly on the CPU. A Raspberry Pi's ARM core cannot execute
+Hitachi H8/500 or the sub-MCU's 6502-derived instructions, so there is nothing
+to virtualise. Virtualisation removes hypervisor overhead; it does not
+translate architectures.
+
+**Off-the-shelf cores exist but do not help.** MAME carries a preliminary
+H8/500 family core under `src/devices/cpu/h8500/` (derived from its H8/300
+work, with DTC unimplemented). It is an *interpreter*, like Nuked's, so it
+would not be faster — and swapping it in would discard exactly the
+bit-exactness that Nuked's reverse engineering exists to provide. The same goes
+for any 6305/740 core for the sub-MCU. These are useful if you want to *write*
+an emulator, not to speed one up.
+
+**What the profile says to do instead**, in order:
+
+1. `--model scb55` — deletes the sub-MCU outright, measured at −15.5% of
+   retired instructions, for a command-line flag.
+2. `PCM_Update`, at half the remaining cost, is the only target that matters.
+   SIMD across its slots is blocked for the reasons in the NEON section; what
+   is left is more of the algebraic work patches 0008-0012 did, and `calc_tv`
+   is still the largest single piece of it.
+3. Faster hardware. A Pi 5 is the cheapest 2x available and needs no code.
+
 ## GPU offload (VideoCore)
 
 Compute is technically reachable — Mesa's `v3dv` gives Vulkan compute on Pi 4
