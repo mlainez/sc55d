@@ -162,27 +162,78 @@ tractable — given an oracle.
 The project also explicitly welcomes contributors interested in reverse
 engineering, so fixes are wanted rather than merely tolerated.
 
-## Fixing them by reading the Nuked source — do not do this
+## Reading the Nuked source as documentation
 
-This is the obvious idea and it is the one method that must be avoided.
+Nuked-SC55 is the best existing description of how this hardware works. Reading
+it to understand the chip, and then writing your own implementation, is a
+normal and generally defensible thing to do — it is not the same act as copying
+it.
 
-Nuked-SC55 is under the pre-2016 MAME licence: **non-commercial, and
-incompatible with the GPL family**. Transcribing its logic into libEmuSC makes
-libEmuSC a derivative work of non-commercially-licensed code. That would:
+Copyright protects expression, not ideas, methods of operation, or facts. How
+the SC-55's PCM chip behaves is a fact about a 1991 sound module; Nuked's
+particular C++ rendering of that behaviour is expression. Reimplementing from
+an understanding of the former is the ordinary way interoperable software gets
+written, and reverse engineering for interoperability has explicit protection
+in EU law and a line of US case law behind it.
 
-- breach the MAME terms as soon as the result ships under LGPL;
-- **destroy the exact property that made libEmuSC attractive** — its LGPL
-  status, and with it any possibility of Spin42 selling anything built on it;
-- be rejected by the maintainer if disclosed, and be a landmine if it is not.
+What stays on the wrong side of the line is literal copying and close
+paraphrase — and, less obviously, non-literal copying of structure, sequence
+and organisation where those are *not* dictated by the hardware. So the
+practical rule is narrow rather than sweeping:
 
-Copyright covers expression, not facts. How the SC-55 hardware behaves is a
-fact. Nuked-SC55's particular C++ rendering of that behaviour is expression.
-The distinction is the whole game here.
+- Understand the chip from the source, then write your own code.
+- Keep the decomposition, naming and comments your own. Do not carry across an
+  idiosyncratic workaround verbatim, or a comment, or a variable name only the
+  original author would have chosen.
+- Where behaviour is dictated by the hardware, converging on similar small
+  functions is expected and fine.
+
+Two caveats that are real but bounded. First, if libEmuSC is the destination,
+its maintainer may still ask about provenance, because a contribution that
+looks Nuked-shaped puts *their* LGPL library at risk — that is a project-policy
+question, not a legal one, and the answer is to ask them before starting rather
+than after. Second, if Spin42 ever sells this, the question stops being
+academic and is worth a professional's half hour.
+
+For a personal build that is never distributed, none of this applies at all:
+the MAME licence restricts selling, not use or modification.
+
+## What the source can and cannot tell you
+
+There is a technical limit here that matters more than the legal one, and it
+splits EmuSC's gap list almost down the middle.
+
+**Nuked's source documents the chip.** The PCM chip's address generator,
+envelope arithmetic, accumulator clipping and interpolation are all right there
+in `pcm.cpp`. For gaps that are questions about chip behaviour, reading it is
+genuinely the fastest route to understanding:
+
+- the sample whose loop length exceeds its sample length — that is the address
+  generator's comparison logic, visible in the source;
+- the TVA envelope's "proper slew function" and the observed rounding error —
+  chip arithmetic, visible in the source;
+- whether there is a pre-run of the pitch envelope — chip behaviour, visible in
+  the source.
+
+**Nuked's source does not document the firmware.** What cutoff the SC-55
+programs for a given velocity, which voice it steals under pressure, how it
+implements portamento — none of that is in Nuked's code, because Nuked does not
+implement it. It *runs* it, out of the ROM. The source will show you the
+registers; only a trace shows you what gets written to them:
+
+- TVF cutoff velocity sensitivity;
+- envelope rates per patch and per phase;
+- voice allocation and stealing;
+- portamento.
+
+So for roughly half the list the source is the efficient path, and for the
+other half it does not help at all and tracing is the only option. That is a
+better reason to build the trace tooling than any licence argument.
 
 ## The method that does work
 
-Use Nuked as an **oracle** and an **instrument**, never as a source to copy
-from.
+Use Nuked as an **oracle** and an **instrument** as well as a reference — for
+the firmware-side questions it is the only option.
 
 **1. Black-box A/B.** Render identical MIDI through both and compare audio.
 This localises divergence to specific instruments and settings — turning
@@ -200,12 +251,11 @@ what it does with a sample whose loop is longer than the sample. The trace is a
 record of what the ROM does — a fact — not a copy of how Nuked computes it.
 Modifying Nuked locally is permitted; only selling it is not.
 
-**3. Implement from observations, not from source.** Write down the observed
-behaviour, then implement libEmuSC's version from that write-up. If this ever
-matters commercially, keep the separation deliberate: whoever reads Nuked
-produces documentation, and whoever writes libEmuSC code works only from the
-documentation. That discipline is worth recording as it happens rather than
-reconstructing later.
+**3. Write your own code.** From the traces for firmware behaviour, and from
+your own understanding for chip behaviour. Keep the decomposition and naming
+yours. Full clean-room separation — one person reads, another writes — is
+belt-and-braces for high-stakes cases rather than a requirement here; it is
+worth the overhead only if this becomes something Spin42 sells.
 
 ### "But independent work would look similar anyway"
 
