@@ -440,6 +440,39 @@ ROM content, so their absolute cost per second of audio is right; the MCU's
 share on top of them is not. Re-profile on the target with real ROMs before
 optimising anything else.
 
+### What it costs, in instructions
+
+Two callgrind runs differing only in length, so every fixed cost — ROM loading,
+unscrambling, SHA-256 verification, firmware boot — cancels in the subtraction:
+
+**1.673 × 10⁹ retired instructions per second of audio**, with the voice pool
+saturated. Against the 3.95x measured on a 2.80 GHz core that implies an IPC of
+2.36 here. Use it to estimate another machine before buying one; it is a far
+better basis than a wall-clock ratio, which carries this host's clock and
+microarchitecture inside it.
+
+Note this is the *dense* figure. The benchmark's warm-up is much cheaper —
+firmware booting, no voices sounding — so an instruction count taken over a
+whole run understates the steady-state cost. The differential is what a
+realtime verdict should be built on.
+
+**Cache is not the constraint**, which is worth knowing because it forecloses a
+line of speculation. Cachegrind with a Pi 3's geometry (32 KB 4-way L1D, 512 KB
+16-way L2, no L3):
+
+```
+I refs   8,478,743,209    I1 miss 0.04%    LLi miss 0.00%
+D refs   2,688,036,610    D1 miss 0.1%     LLd miss 0.0%
+LL misses    1,218,661
+```
+
+Three megabytes of wave ROM against half a megabyte of L2 looks like it should
+thrash, and it does not: voices read contiguous samples, so the pattern is
+localised. Even attributing every last-level miss to the dense section puts the
+DRAM cost at roughly 6% of a Pi 3 core. The emulator is instruction-bound, not
+memory-bound, and a board should be judged on how many instructions per second
+it retires.
+
 ### Known ceiling
 
 The thing render-ahead cannot do is make the core faster. It converts spare
