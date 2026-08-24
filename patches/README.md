@@ -56,6 +56,9 @@ too.
 | `0001-mcu_timer-closed-form-advancement.patch` | `TIMER_Clock()` walks one cycle at a time applying ticks that change nothing — 55M ticks produced 1561 events in a measured run. Defers the counters and schedules the next event in closed form. | `TIMER_Clock` 2295M → 38M retired instructions; whole program 7865M → 5608M. Worst case on a microbenchmark with timers actually programmed: 691 → 184 Ir/call. **Differential test + 9/9 mutants; real-ROM audio unchecked.** |
 | `0002-rom_io-table-driven-unscramble.patch` | `unscramble()` rebuilds two fixed bit permutations a bit at a time per byte — ~28 tests over 2–3 MB of wave ROM. Precomputes 8.25 KiB of tables. | 5.1x faster startup. **Equivalence proved exhaustively.** |
 
+See also [`candidates/`](candidates/) for patches that are correct but whose
+value cannot be established without real ROMs, and which no build applies.
+
 ### Proofs
 
 Both have ROM-free tests, because both transformations are decidable without

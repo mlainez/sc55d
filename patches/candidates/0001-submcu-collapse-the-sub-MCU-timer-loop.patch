@@ -1,0 +1,143 @@
+submcu: collapse the sub-MCU timer loop
+
+SM_UpdateTimer() runs exactly three iterations per call, always -- measured,
+51,281,745 iterations over 17,093,915 calls with a single spike at 3 in the
+histogram, and provable from the fact that sm.cycles only ever advances by 48
+and sm.timer_cycles by 16. Most of those iterations only decrement a
+prescaler. The loop is 44.3% of SM_Update, itself 11.5% of the program.
+
+This computes the tick count and short-circuits the prescaler-only case rather
+than walking it. GCC already hoists the enable and sleep loads and keeps
+timer_cycles in a register, so what is left to remove is the prescaler and
+counter memory round-trip.
+
+Hand-counted Cortex-A53 instructions per call: 29 -> 18 on the fast exit a
+real ROM takes, 56 -> 50 when all three ticks fire, and 29 -> 38 for three
+prescaler-only ticks with no shortcut. Break-even is a fast-path hit rate
+around 45%, which any prescaler reload of 3 or more clears.
+
+CANDIDATE, NOT SHIPPED -- see patches/candidates/README.md. The program-wide
+effect ranges from -1.2% to +0.8% depending on the prescaler reload value the
+firmware programs, which cannot be known from zero-filled ROMs. Gate it on one
+measurement from real hardware.
+
+Idempotency of the interrupt raise was verified rather than assumed:
+INT_REQUEST is device_mode[0x1c], the three registers the loop reads are 0x1d,
+0x1e and 0x1f, the loop body makes no calls and never reads INT_REQUEST back,
+and both things that clear it run outside the loop.
+
+tests/sm_timer_equivalence.cpp checks 6,374,220 cases with no ROMs --
+exhaustive over small prescaler/counter/reload/tick combinations including
+unaligned starts, exhaustive over enable x sleep x pre-set-INT_REQUEST, 3M
+random cases over the full 8-bit ranges, and catch-ups of 65536 and 1000003
+ticks. It compares final state, the exit point, and the index of the first
+firing tick, so a collapsed interrupt raise would still be caught. Seven
+deliberate bugs are all rejected.
+
+Found by a subagent; patch and test verified here, recommendation followed.
+
++++ b/src/backend/submcu.cpp
+@@ -1390,29 +1390,88 @@
+     }
+ }
+ 
++// The timer ticks once per 16 sub-MCU cycles.  SM_Update calls this after
++// every sub-MCU instruction, having just advanced sm.cycles by 48, and
++// sm.cycles is written nowhere else except SM_Reset (which zeroes it at
++// power-on, when timer_cycles is zero too).  The loop below therefore runs
++// exactly three times per call -- measured: 51,281,745 iterations over
++// 17,093,915 calls, and never any other count.
++//
++// Nothing the body touches can be observed between those iterations.  It makes
++// no calls; it never reads back sm.timer_cycles, and the only register it
++// writes, INT_REQUEST (0x1c), is distinct from the three it reads --
++// PRESCALER (0x1d), TIMER (0x1e) and TIMER_CTRL (0x1f) -- and is never read
++// inside the loop.  sm.sleep is not touched either.  So the whole tick count
++// can be worked out up front and the invariants read once:
++//
++//   * timer off (TIMER_CTRL bit 5) or asleep: the body is a no-op, only
++//     timer_cycles moves;
++//   * fewer ticks than the prescaler has left: the prescaler never reaches
++//     zero, so the counter cannot move and no interrupt can be raised.  This
++//     is the case a real ROM spends nearly all its time in.
++//
++// Otherwise the countdown still runs a tick at a time, but entirely in
++// registers, with the two reload registers hoisted and the interrupt raised
++// once at the end.  `|= 0x8` is idempotent and no iteration reads or clears
++// it, so raising it once is indistinguishable from raising it on every firing
++// tick -- proved in patches/tests/sm_timer_equivalence.cpp, which also checks
++// the index of the first firing tick, not merely the final flag.
++//
++// timer_cycles must land exactly where the original loop left it and not one
++// tick further: it persists across calls, so overshooting would silently
++// consume ticks that a later, finer prescaler setting would have made live.
++// That is the mistake patches/0001 made in draft and the test rejects it.
+ void SM_UpdateTimer(submcu_t& sm)
+ {
+-    while (sm.timer_cycles < sm.cycles)
++    const uint64_t target = sm.cycles;
++    const uint64_t start = sm.timer_cycles;
++
++    if (start >= target)
++        return;
++
++    // The original adds 16 until timer_cycles >= target, so it runs
++    // ceil((target - start) / 16) times and stops exactly there.
++    const uint64_t ticks = (target - start + 15) >> 4;
++    sm.timer_cycles = start + (ticks << 4);
++
++    if ((sm.device_mode[SM_DEV_TIMER_CTRL] & 0x20) != 0 || sm.sleep)
++        return;
++
++    uint32_t prescaler = sm.timer_prescaler;
++    if (ticks <= prescaler)
++    {
++        sm.timer_prescaler = (uint8_t)(prescaler - (uint32_t)ticks);
++        return;
++    }
++
++    const uint32_t prescaler_reload = sm.device_mode[SM_DEV_PRESCALER];
++    const uint32_t counter_reload = sm.device_mode[SM_DEV_TIMER];
++    uint32_t counter = sm.timer_counter;
++    uint32_t fired = 0;
++    uint64_t remaining = ticks;
++
++    do
+     {
+-        if ((sm.device_mode[SM_DEV_TIMER_CTRL] & 0x20) == 0 && !sm.sleep)
++        if (prescaler == 0)
+         {
+-            if (sm.timer_prescaler == 0)
+-            {
+-                sm.timer_prescaler = sm.device_mode[SM_DEV_PRESCALER];
++            prescaler = prescaler_reload;
+ 
+-                if (sm.timer_counter == 0)
+-                {
+-                    sm.timer_counter = sm.device_mode[SM_DEV_TIMER];
+-                    sm.device_mode[SM_DEV_INT_REQUEST] |= 0x8;
+-                }
+-                else
+-                    sm.timer_counter--;
++            if (counter == 0)
++            {
++                counter = counter_reload;
++                fired = 1;
+             }
+             else
+-                sm.timer_prescaler--;
++                counter--;
+         }
+-        sm.timer_cycles += 16;
+-    }
++        else
++            prescaler--;
++    } while (--remaining);
++
++    sm.timer_prescaler = (uint8_t)prescaler;
++    sm.timer_counter = (uint8_t)counter;
++    if (fired)
++        sm.device_mode[SM_DEV_INT_REQUEST] |= 0x8;
+ }
+ 
+ void SM_UpdateUART(submcu_t& sm)

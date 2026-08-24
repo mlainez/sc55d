@@ -341,20 +341,43 @@ be built the same way 0001 was: a differential harness that drives a modelled
 and a real timer side by side over random register programming, checking full
 state after every call.
 
+## Measuring this yourself: two traps
+
+Both cost a subagent real time here.
+
+**Do not install `valgrind:arm64` alongside the x86 one.** Valgrind is not
+`Multi-Arch: same`, so the arm64 package *replaces* `/usr/bin/valgrind.bin` and
+silently breaks every x86 callgrind run — wrong numbers, no error. It would not
+have helped anyway: valgrind does not run under `qemu-user`.
+
+**`qemu-user` here has no TCG plugins**, so there is no way to get real aarch64
+instruction counts: `-plugin` is unrecognised and there is no `libinsn.so` in
+the image or the archive. Trace-counting with `-d exec,nochain` is arithmetically
+possible and needs about 20 GB of log per benchmark run. The workable fallback
+is static analysis — `objdump` the cross-built binary and count instructions per
+path by hand, which is how the A53 figures in `patches/candidates/README.md`
+were obtained.
+
 ## Where the effort actually belongs
 
 Ranked by measured evidence rather than novelty:
 
-1. **Build flags** — `-mcpu`, LTO, PGO. Free, and PGO in particular suits a
-   dispatch-table interpreter. See the README.
-2. **`patches/0001`** — `TIMER_Clock` closed-form advancement. 2295M → 38M
-   retired instructions; 3x better than edge-skipping in the worst measured
-   case, 10-13x typically. Differential test plus 9/9 mutants; real-ROM audio
+1. **Romset choice** — `scb55` has no sub-MCU: **−15.5% of retired
+   instructions**, measured, for a command-line flag. Nothing else here comes
+   close.
+2. **Build flags** — LTO (+8.9% without it) and `-O3` (+11.5% at `-O2`) are
+   already the defaults and are worth having. PGO measured at only −1.3% and
+   inverts on an untrained workload; the cheap flags measure at exactly zero.
+   Table in the README.
+3. **`patches/0001`** — `TIMER_Clock` closed-form advancement. 2295M → 38M
+   retired instructions. Differential test plus 9/9 mutants; real-ROM audio
    still unchecked.
-3. **Romset choice** — `scb55` has no sub-MCU, deleting 12% of the workload
-   outright with no patch at all.
-4. **`patches/0002`** — startup, done and proved.
-5. **Re-profile on the target with real ROMs.** Everything above was measured on
+4. **`patches/0002`** — startup, 5.1x, proved exhaustively.
+5. **`patches/candidates/0001`** — the sub-MCU timer loop, worth about 1% on an
+   mk2 *if* the firmware's prescaler reload is 3 or more, and a regression
+   below that. One measurement on real hardware decides it.
+6. **Re-profile on the target with real ROMs.** Everything above was measured
+   on x86-64 with placeholder ROMs. Everything above was measured on
    x86-64 with placeholder ROMs, which under-represents the MCU interpreter. The
    ranking could change; `--bench` and callgrind are all it takes.
 

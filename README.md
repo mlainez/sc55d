@@ -180,33 +180,56 @@ throughput and memory latency. In rough order of how much they buy you:
 
 ### Build flags
 
-| Flag | Why |
-|---|---|
-| `-DSC55D_CPU=cortex-a53` / `cortex-a72` | Gives the compiler the real pipeline model. Worth most on the **Pi 3**, whose Cortex-A53 is *in-order* — it cannot hide a badly scheduled load the way the Pi 4's out-of-order A72 does. |
-| `-DSC55D_LTO=ON` (default) | Lets the PCM, MCU and sc55d translation units inline into each other. The render loop calls across all three per emulated instruction. |
-| `-DSC55D_PGO=generate` → `use` | Biggest single win for an interpreter. The opcode dispatch is one enormous indirect branch; profile data lets the compiler lay out the hot handlers together and predict the branches. |
-| 64-bit OS | The core counts cycles in `uint64_t` everywhere. A 32-bit armhf userland pays for every one of those. The Pi 3 is aarch64-capable — use the 64-bit image. |
+All measured, in retired instructions, on the 32-slot workload. The defaults
+are the defaults because of this table, not by assumption.
 
-The PGO cycle, using the benchmark as the training run:
+| Configuration | vs default | Verdict |
+|---|---|---|
+| **gcc `-O3` + LTO** (default) | — | keep |
+| LTO off | **+8.9%** | LTO earns its default |
+| `-O2` + LTO | **+11.5%** | `-O3` earns its default |
+| `-O2`, no LTO | +43.3% | — |
+| clang `-O3` + LTO | **+21.6%** | stay on gcc |
+| **+ PGO** | **−1.3%** | not worth enabling by default — see below |
+| `-fno-plt`, `-fno-semantic-interposition`, `-fvisibility=hidden` | **0.0%** | no effect, skip them |
+| `-funroll-loops` | −0.8% on x86 | **do not use on ARM** — see below |
 
-```bash
-cmake -S . -B build-pgo -DCMAKE_BUILD_TYPE=Release \
-      -DSC55D_CPU=cortex-a53 -DSC55D_PGO=generate
-cmake --build build-pgo -j4
-./build-pgo/sc55d --roms /usr/share/sc55d/roms --bench --bench-seconds 30
+`-DSC55D_CPU=cortex-a53` barely changes *which* instructions are generated
+(228 vs 225 in `SM_Update` against generic aarch64). Its real value is
+instruction *scheduling* for an in-order pipeline, which no tool available here
+can score. Harmless, keep it, but do not expect a number.
 
-cmake -S . -B build-pgo -DSC55D_PGO=use
-cmake --build build-pgo -j4
-```
+**PGO is a disappointment, and earlier advice here was wrong.** This document
+previously suggested PGO might be the biggest single win, on the reasoning that
+upstream PR #51's main safe technique was hand-reordering branches by hit
+frequency and PGO automates exactly that. Measured, the full cycle yields
+**−1.3%**, nowhere near PR #51's reported ~35%. Worse, a binary trained on one
+romset ran **0.14% slower** on another — the gain is profile-specific and
+inverts under a workload change.
 
-Train on the model you will actually run — the profile bakes in which code paths
-matter, and mk2 and mk1 take different ones.
+The training run here used zero-filled ROMs, where both CPUs execute mostly
+invalid opcodes, so precisely the opcode-dispatch frequencies PR #51 targeted
+are the ones the profile gets wrong. That neither confirms nor refutes the 35%
+claim; it does establish that PGO is not a free substitute for it, and that
+training on a fake workload is worse than not training at all. **If you want
+PGO, train it on the Pi, on real ROMs, playing music you care about.**
+
+`-funroll-loops` is the clearest case of a result that does not travel: −0.8%
+on x86-64, but on aarch64 it adds 64 instructions to `SM_Update` and 4.5 KiB to
+`.text`. An A53 has a 32 KiB L1I and no out-of-order engine to hide the extra
+code.
+
+The cheap flags measure as *exactly* zero — single-digit instructions out of
+7.86 billion, not "too small to see". LTO has already merged the hot code into
+one unit, and none of it crosses a shared-object boundary, so there is nothing
+for them to act on.
 
 ### Pick a cheaper machine
 
 Not every SC-55 costs the same to emulate, and the differences are large:
 
-- **`--model scb55` (or `rlp3237`) has no sub-MCU.** On an mk2 the core emulates
+- **`--model scb55` (or `rlp3237`) has no sub-MCU — measured at −15.5% of all
+  retired instructions, the single largest lever in this document.** On an mk2 the core emulates
   a *second* CPU, stepping it after every instruction of the first. The SCB-55
   is the same sound engine on a card with no front panel, so that whole second
   interpreter collapses into cheap UART polling. On a Pi 3 this is likely the
