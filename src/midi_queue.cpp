@@ -10,7 +10,17 @@ void MidiQueue::Push(const uint8_t *data, size_t length)
     /* The whole ring is usable.  head_ and tail_ are monotonic counters, not
      * masked indices, so a full ring is head - tail == kSize and an empty one
      * is head == tail: the two cannot be confused, and there is no need to
-     * sacrifice a slot to tell them apart. */
+     * sacrifice a slot to tell them apart.
+     *
+     * That last byte is not academic.  midi_in.cpp decodes into a buffer of
+     * exactly kSize, so giving up a slot here would mean a maximal sysex that
+     * ALSA decoded successfully could never be pushed -- refused every time,
+     * even into a completely empty queue.
+     *
+     * The invariant this rests on is 0 <= head - tail <= kSize, and it is a
+     * sharp edge: let `used` exceed kSize just once and this subtraction
+     * underflows to about four billion, after which the guard below accepts
+     * everything.  tests/midi_queue has a mutant for exactly that. */
     const uint32_t free_bytes = kSize - (head - tail);
     if (length > free_bytes)
     {
@@ -28,11 +38,19 @@ size_t MidiQueue::Drain()
 {
     const uint32_t tail = tail_.load(std::memory_order_relaxed);
 
-    /* Acquire, rather than the cheaper relaxed load plus an acquire fence:
-     * this runs a handful of times per period, so the barrier costs nothing
-     * measurable, and ThreadSanitizer does not model standalone fences.  It
-     * reports the fence version as a race, which would make TSan useless on
-     * the one file in sc55d where it has something to say. */
+    /* Acquire, rather than the cheaper relaxed load plus an acquire fence.
+     *
+     * The fence version is correct -- [atomics.fences]/3: a release store
+     * synchronizes with an acquire fence when an atomic read of the same
+     * object, sequenced before the fence, reads the value it wrote.  It is
+     * ThreadSanitizer that cannot see it, and not by accident: GCC warns
+     * "'atomic_thread_fence' is not supported with '-fsanitize=thread'"
+     * (-Wtsan), and TSan duly reports the payload read as a race.
+     *
+     * This runs a handful of times per period, not once per emulated
+     * instruction, so the barrier costs nothing measurable -- and giving it up
+     * would cost a usable TSan on the one file in sc55d where TSan has
+     * anything to say.  Cheap trade. */
     const uint32_t head = head_.load(std::memory_order_acquire);
     if (head == tail)
         return 0;

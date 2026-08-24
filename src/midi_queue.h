@@ -44,7 +44,10 @@ public:
     unsigned long Dropped() const { return dropped_.load(std::memory_order_relaxed); }
 
 private:
-    static const uint32_t kSize = 8192; /* power of two, same as the core's FIFO */
+    /* Power of two, and the same 8192 as both the core's own FIFO and
+     * midi_in.cpp's decode buffer -- it must not be smaller than the largest
+     * message that can be handed to Push(), or that message can never fit. */
+    static const uint32_t kSize = 8192;
     static const uint32_t kMask = kSize - 1;
 
     uint8_t data_[kSize]{};

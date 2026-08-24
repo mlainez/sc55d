@@ -184,9 +184,17 @@ void Consume(int frames)
     g_frames = left;
 }
 
-/* Called from the MIDI thread while the render thread runs the core.  The
- * backend's MIDI FIFO takes the same unsynchronised posting upstream's RtMidi
- * callback does. */
+/*
+ * Render thread only.  This is not a preference.
+ *
+ * The backend's MIDI FIFO -- mcu_t::uart_buffer with its uart_write_ptr and
+ * uart_read_ptr -- has no synchronisation whatsoever, so calling this from a
+ * second thread is a data race, and on a weakly ordered machine a real one.
+ * sc55d used to do exactly that, as upstream's RtMidi callback still does.
+ * Everything that arrives from elsewhere goes through MidiQueue and is handed
+ * over here by the render thread; see midi_queue.h for why the fix lives on
+ * our side of the boundary rather than in the core.
+ */
 void PostMidi(const uint8_t *data, size_t length)
 {
     g_emu.PostMIDI(std::span<const uint8_t>(data, length));
