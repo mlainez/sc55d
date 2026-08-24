@@ -534,9 +534,19 @@ Short of a real Pi, the following were checked here, on x86-64 with a real
 - **Thread safety.** The period ring and the MIDI queue each have a test that
   drives them from two threads and verifies every period and every byte
   arrives exactly once, in order, uncorrupted — run under ThreadSanitizer and
-  under ASan/UBSan, each with a set of deliberate mutants that the test is
-  required to kill. `tests/`. The whole daemon also runs clean under
-  ThreadSanitizer against ALSA's `null` device.
+  under ASan/UBSan, and each with a set of deliberate mutants the test is
+  required to kill (9 and 14 respectively, all killed):
+
+  ```bash
+  ./tests/ring/run.sh
+  ./tests/midi_queue/run.sh
+  ```
+
+  Neither needs ROMs, ALSA or an audio device, and neither writes inside the
+  repository. `pi-check.sh --full` runs both on the board, which is the
+  interesting place for them. The whole daemon also runs clean under
+  ThreadSanitizer, both idle against ALSA's `null` device and with 2570 MIDI
+  events crossing the queue during `--selftest`.
 - **Patch equivalence tests** pass compiled for A53 and run on aarch64.
 - **Builds with GCC 12**, which is what Raspberry Pi OS Bookworm ships — the
   core requires C++23, so that was worth confirming.
