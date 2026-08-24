@@ -1,4 +1,6 @@
 /* ALSA playback.  Deliberately plain: one blocking writei per period, which is
+ * SPDX-License-Identifier: MIT
+ *
  * what paces the render loop. */
 #include "audio_out.h"
 

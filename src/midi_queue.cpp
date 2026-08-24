@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #include "midi_queue.h"
 
 #include "core.h"

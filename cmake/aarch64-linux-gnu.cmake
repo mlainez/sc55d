@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 # Cross-compile sc55d for 64-bit ARM (Raspberry Pi 3 and later).
 #
 #   sudo dpkg --add-architecture arm64        # plus an arm64 apt source

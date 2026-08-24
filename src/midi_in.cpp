@@ -1,4 +1,6 @@
 /*
+ * SPDX-License-Identifier: MIT
+ *
  * ALSA sequencer MIDI input.  Sequencer events are decoded back into the raw
  * MIDI byte stream and fed to the emulated MCU's serial port one byte at a
  * time, exactly as a real SC-55 would receive them.

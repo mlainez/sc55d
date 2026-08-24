@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: MIT
 # Builds and runs the MidiQueue test three ways, then checks that the test can
 # actually fail by breaking the queue on purpose.  Nothing is written inside
 # the repository.

@@ -1,4 +1,6 @@
 /*
+ * SPDX-License-Identifier: MIT
+ *
  * Correctness harness for PeriodRing (src/ring.h, src/ring.cpp).
  *
  * The ring is the only place in sc55d where two threads touch the same memory

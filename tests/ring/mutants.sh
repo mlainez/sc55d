@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 #
+# SPDX-License-Identifier: MIT
+#
 # Deliberately break src/ring.cpp one way at a time and confirm ring_test
 # notices. A test that cannot fail is not evidence.
 #

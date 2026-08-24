@@ -1,4 +1,6 @@
 /*
+ * SPDX-License-Identifier: MIT
+ *
  * Benchmark mode: how much faster than realtime does this machine render?
  *
  * The MIDI sequence is generated here rather than loaded from a file, so the

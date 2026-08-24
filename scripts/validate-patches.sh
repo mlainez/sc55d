@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 #
+# SPDX-License-Identifier: MIT
+#
 # Decide whether the patches in patches/ are safe to enable, using your ROMs.
 #
 #   ./scripts/validate-patches.sh --roms <dir> [--seconds 30] [--models "mk2 st ..."]

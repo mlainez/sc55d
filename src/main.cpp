@@ -1,4 +1,6 @@
 /*
+ * SPDX-License-Identifier: MIT
+ *
  * sc55d -- headless Roland SC-55 emulator daemon.
  *
  * MIDI comes in over the ALSA sequencer and audio goes out over ALSA.  There

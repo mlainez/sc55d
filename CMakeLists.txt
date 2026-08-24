@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 cmake_minimum_required(VERSION 3.20)
 project(sc55d VERSION 0.2.0 LANGUAGES C CXX)
 

@@ -20,10 +20,18 @@ WHAT THIS MEANS IN PRACTICE
   * These terms are incompatible with the GNU GPL, which does not permit the
     added non-commercial restriction. Do not attempt to relicense the
     combination under the GPL.
+  * No SC-55 ROM data is included or downloaded by this repository. The ROMs
+    are Roland's copyright and are licensed to you by no one here.
 
-sc55d's own source under src/, scripts/, contrib/ and cmake/ is original work
-and contains no code from the core. It calls the core through its public API
-only. See LICENCE-NOTE in README.md for its status.
+sc55d's own source -- src/, tests/, scripts/, contrib/, cmake/, docs/ and the
+top-level build files -- is original work under the MIT licence (see LICENSE).
+It contains no code from the core and calls it through its public API only.
+
+The MIT licence covers those files alone. It does NOT lift any of the terms
+above from a binary built here, because such a binary contains the core. In
+particular, MIT permits selling and the core's licence does not: the core's
+terms win on the combination. LICENSING.md spells out exactly what applies to
+what.
 
 -------------------------------------------------------------------------------
 Nuked-SC55 -- https://github.com/nukeykt/Nuked-SC55

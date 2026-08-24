@@ -1,4 +1,6 @@
 /*
+ * SPDX-License-Identifier: MIT
+ *
  * Thin wrapper over the Nuked-SC55 backend library.
  *
  * The core pushes finished stereo frames through a sample callback; we clamp

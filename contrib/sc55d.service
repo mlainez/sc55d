@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 [Unit]
 Description=Roland SC-55 emulator (Nuked-SC55, headless)
 Documentation=https://github.com/nukeykt/Nuked-SC55

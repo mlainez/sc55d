@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 #
+# SPDX-License-Identifier: MIT
+#
 # Builds and runs the PeriodRing harness three ways and then mutation-tests it.
 #
 #   ./tests/ring/run.sh

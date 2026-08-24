@@ -1,4 +1,6 @@
 /*
+ * SPDX-License-Identifier: MIT
+ *
  * MidiQueue: does every byte the MIDI thread pushes reach the core exactly
  * once, in order, uncorrupted?
  *

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 #
+# SPDX-License-Identifier: MIT
+#
 # One-shot readiness check for running sc55d on a Raspberry Pi.
 #
 #   ./scripts/pi-check.sh [--roms <dir>] [--full]

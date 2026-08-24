@@ -1,4 +1,6 @@
 /* Realtime setup and signal handling.  Every step here is best effort: without
+ * SPDX-License-Identifier: MIT
+ *
  * CAP_SYS_NICE or RLIMIT_MEMLOCK we warn and keep going. */
 #include "rt.h"
 
