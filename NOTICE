@@ -1,0 +1,63 @@
+Third-party notices for sc55d
+=============================
+
+sc55d links against, and carries patches for, the Nuked-SC55 emulation core.
+The core is not included in this repository -- it is a git submodule pointing
+at https://github.com/jcmoyer/Nuked-SC55, a fork of nukeykt's Nuked-SC55 -- but
+the patches under patches/ contain excerpts of its source as diff context, and
+any binary built from this repository contains the core.
+
+The core's licence therefore applies to those patches and to any such binary.
+Its terms are reproduced below in full, as that licence requires.
+
+WHAT THIS MEANS IN PRACTICE
+
+  * A binary built from this repository may not be sold, and may not be used
+    in a commercial product or activity.
+  * If you distribute a modified build, you must make the complete
+    corresponding source available.
+  * This notice must travel with any redistribution.
+  * These terms are incompatible with the GNU GPL, which does not permit the
+    added non-commercial restriction. Do not attempt to relicense the
+    combination under the GPL.
+
+sc55d's own source under src/, scripts/, contrib/ and cmake/ is original work
+and contains no code from the core. It calls the core through its public API
+only. See LICENCE-NOTE in README.md for its status.
+
+-------------------------------------------------------------------------------
+Nuked-SC55 -- https://github.com/nukeykt/Nuked-SC55
+Copyright (C) 2021, 2024 nukeykt
+Fork: https://github.com/jcmoyer/Nuked-SC55
+
+Nuked SC55 is distributed under the original MAME license:
+
+Redistribution and use of this code or any derivative works are permitted
+provided that the following conditions are met:
+
+* Redistributions may not be sold, nor may they be used in a commercial
+product or activity.
+
+* Redistributions that are modified from the original source must include the
+complete source code, including the source code for all components used by a
+binary built from the modified sources. However, as a special exception, the
+source code distributed need not include anything that is normally distributed
+in either source or binary form) with the major components (compiler, kernel,
+and so on) of the operating system on which the executable runs, unless that
+component itself accompanies the executable.
+
+* Redistributions must reproduce the above copyright notice, this list of
+conditions and the following disclaimer in the documentation and/or other
+materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.

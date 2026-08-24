@@ -1,5 +1,10 @@
 # Core patches
 
+> **Licence:** these patches contain excerpts of the emulation core's source as
+> diff context, so they carry the core's licence, not sc55d's. See
+> [`../NOTICE`](../NOTICE). In short: redistributable, but not saleable and not
+> for commercial use, and the notice must travel with them.
+
 Performance patches for the emulation core. They are applied at build time to a
 copy of the core under the build tree — **the `vendor/nuked-sc55` submodule is
 never modified**, so it stays a pristine checkout and everything we change is

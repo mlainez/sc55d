@@ -427,17 +427,26 @@ vendor/nuked-sc55/      the emulation core, unmodified (submodule)
 
 ## Licence
 
-The emulation core in `vendor/nuked-sc55` is under the **original (pre-2016)
-MAME licence**, which is not an open-source licence: redistribution is allowed,
-but **not selling it and not using it in a commercial product or activity**, any
-modified binary must ship complete source, and the copyright notice and
-conditions must be reproduced with the distribution. See
-`vendor/nuked-sc55/LICENSE`.
+**Read [`NOTICE`](NOTICE) before redistributing anything.** It reproduces the
+emulation core's licence in full, as that licence requires.
 
-Those terms cover anything built from this repository, because sc55d is useless
-without the core. That also makes the combination GPL-incompatible — the GPL
-does not allow the extra non-commercial restriction — so sc55d cannot be merged
-into a GPL project such as mt32-pi.
+The short version: the core in `vendor/nuked-sc55` is under the original
+(pre-2016) **MAME licence**, which is not an open-source licence. Redistribution
+is allowed, but **not selling, and not use in a commercial product or
+activity**; a modified build must ship complete source; and the notice must
+travel with any redistribution. Those terms cover any binary built here, and
+they cover the patches in `patches/`, which contain core source as diff context.
+They are also GPL-incompatible, so this combination cannot be relicensed under
+the GPL.
 
-No ROM data is included or downloaded. The SC-55 ROMs are Roland's copyright and
-have to come from your own hardware.
+sc55d's own code — everything in `src/`, `scripts/`, `contrib/` and `cmake/` —
+is original work. It contains no code from the core and reaches it only through
+its public API. **No licence has been chosen for it yet**, which means default
+copyright: fine for a personal build, but it needs deciding before publishing.
+A permissive licence (MIT or BSD-2-Clause) is the sensible default — it creates
+no conflict with the core's terms, and it keeps sc55d reusable should the
+backend ever change (see [`docs/backend-options.md`](docs/backend-options.md),
+where libEmuSC is LGPL and carries no such restriction).
+
+No ROM data is included or downloaded. The SC-55 ROMs are Roland's copyright
+and have to come from your own hardware.
