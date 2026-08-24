@@ -16,10 +16,12 @@ real ROM takes, 56 -> 50 when all three ticks fire, and 29 -> 38 for three
 prescaler-only ticks with no shortcut. Break-even is a fast-path hit rate
 around 45%, which any prescaler reload of 3 or more clears.
 
-CANDIDATE, NOT SHIPPED -- see patches/candidates/README.md. The program-wide
-effect ranges from -1.2% to +0.8% depending on the prescaler reload value the
-firmware programs, which cannot be known from zero-filled ROMs. Gate it on one
-measurement from real hardware.
+Shipped after the gate was measured on real firmware. The effect depends on
+the prescaler reload the firmware programs, which zero-filled ROMs drove to an
+unrealistic 0-1; the real mk2 firmware programs 124 for 99.5% of a run, and
+the fast path is eligible 96.3% of the time against a break-even of about 45%.
+Measured on a real SC-55mk2 set: -2.70% of retired program instructions, and
+bit-identical audio (digest b1e9a497433a81fa with and without).
 
 Idempotency of the interrupt raise was verified rather than assumed:
 INT_REQUEST is device_mode[0x1c], the three registers the loop reads are 0x1d,

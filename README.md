@@ -288,7 +288,7 @@ isolcpus=3 nohz_full=3 rcu_nocbs=3 irqaffinity=0-2
 
 ### Core patches
 
-`patches/` holds twelve performance patches applied at build time to a copy of
+`patches/` holds thirteen performance patches applied at build time to a copy of
 the core; the submodule itself is never modified. They are **on by default**,
 validated bit-identical against 30 seconds of real SC-55mk2 audio, and each has
 a ROM-free equivalence test. `-DSC55D_PATCH_CORE=OFF` disables them.

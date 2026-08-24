@@ -81,6 +81,7 @@ register.
 | 0010 | `pcm-template-calc-tv-on-the-envelope-index` | `e` is a literal at all four sites; `e==2` drops its dead half. |
 | 0011 | `pcm-gate-reverb-injection-switches` | Only 6 of 32 slots inject. Two indirect jumps per slot become one predictable test — **worth more than its instruction count on an in-order A53**. |
 | 0012 | `pcm-skip-dead-fourth-address-step` | Below the `sub_phase_of` threshold the tail *and one of five wave ROM reads* are dead. |
+| 0013 | `submcu-collapse-the-sub-MCU-timer-loop` | `SM_UpdateTimer` runs exactly three iterations per call, mostly decrementing a prescaler. **−2.70%** on real firmware, which programs a reload of 124 against a break-even of 3. |
 
 0008–0012 together are **−21.0% of PCM per tick** with all 32 voices on, and
 between −19.7% and −22.7% across every activity level — they do not depend on
