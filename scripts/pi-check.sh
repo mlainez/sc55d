@@ -2,20 +2,24 @@
 #
 # One-shot readiness check for running sc55d on a Raspberry Pi.
 #
-#   ./scripts/pi-check.sh [--roms <dir>]
+#   ./scripts/pi-check.sh [--roms <dir>] [--full]
 #
 # Reports the board and toolchain, picks the right -mcpu, builds, runs the
 # patch equivalence tests, inspects the system tuning that decides whether
 # audio will glitch, and finally runs the benchmark if ROMs are available.
+# --full also runs sc55d's own thread-safety tests, which are slow but which
+# this board is the right place to run.
 # Nothing here changes the system; it only tells you what to change.
 
 set -u
 
 ROMS=""
+FULL=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --roms) ROMS="${2:-}"; shift 2 ;;
-        -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+        --full) FULL=1; shift ;;
+        -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -145,6 +149,26 @@ done
 note "These prove the patch transformations, not the emulation."
 note "Use scripts/validate-patches.sh with real ROMs before trusting them."
 
+# --------------------------------------------------- sc55d's own threads ----
+head2 "Thread-safety tests"
+
+if [ "$FULL" -eq 1 ]; then
+    for t in tests/*/run.sh; do
+        [ -e "$t" ] || continue
+        name=$(basename "$(dirname "$t")")
+        if "$t" > "/tmp/sc55d-$name.log" 2>&1; then
+            ok "$name"
+        else
+            warn "$name FAILED"
+            tail -12 "/tmp/sc55d-$name.log"
+        fi
+    done
+else
+    note "Skipped; re-run with --full to include them. They take a few minutes"
+    note "(ThreadSanitizer builds), but this board is the interesting place to"
+    note "run them: the ordering bugs they look for cannot happen on x86."
+fi
+
 # --------------------------------------------------------------- tuning ----
 head2 "Realtime tuning"
 
@@ -166,14 +190,41 @@ if command -v vcgencmd > /dev/null 2>&1; then
     fi
 fi
 
+cores=$(nproc 2>/dev/null || echo 1)
+if [ "$cores" -ge 2 ]; then
+    ok "$cores cores: --render-ahead can put the renderer and the audio write"
+    note "on different cores, which is what absorbs scheduling jitter."
+else
+    warn "single core: --render-ahead cannot help here"
+    note "Run with --render-ahead 0 so the renderer is not paying for a ring"
+    note "and two threads it has no second core to use."
+fi
+
 cmdline=$(cat /proc/cmdline 2>/dev/null)
 if printf '%s' "$cmdline" | grep -q isolcpus; then
     ok "isolcpus set: $(printf '%s' "$cmdline" | tr ' ' '\n' | grep isolcpus)"
-    note "Remember to run sc55d with --cpu <that core>."
+    note "Remember to run sc55d with --cpu <that core>, and --output-cpu on a"
+    note "different one -- both threads on the isolated core gets you the"
+    note "serial behaviour back with extra latency."
 else
     warn "no isolated CPU"
     note "In /boot/firmware/cmdline.txt add: isolcpus=3 nohz_full=3 irqaffinity=0-2"
-    note "then run sc55d with --cpu 3."
+    note "then run sc55d with --cpu 3 --output-cpu 2."
+fi
+
+# The single most likely reason a correctly-configured Pi still glitches.
+rt_runtime=$(cat /proc/sys/kernel/sched_rt_runtime_us 2>/dev/null)
+rt_period=$(cat /proc/sys/kernel/sched_rt_period_us 2>/dev/null || echo 1000000)
+if [ "${rt_runtime:--1}" = "-1" ]; then
+    ok "kernel RT throttle disabled"
+elif [ -n "$rt_runtime" ] && [ "$rt_runtime" -lt "$rt_period" ] 2>/dev/null; then
+    bad "kernel RT throttle is on: SCHED_FIFO threads are stopped for"
+    note "$(( (rt_period - rt_runtime) / 1000 )) ms out of every $(( rt_period / 1000 )) ms once they saturate a core."
+    note "That is far longer than any audio buffer, so it is an xrun every"
+    note "second, and it bites hardest exactly when the board is struggling."
+    note "  sudo sysctl -w kernel.sched_rt_runtime_us=-1"
+    note "  echo 'kernel.sched_rt_runtime_us=-1' | sudo tee /etc/sysctl.d/99-sc55d.conf"
+    note "Or run with --no-realtime, which avoids SCHED_FIFO entirely."
 fi
 
 rtprio=$(ulimit -Hr 2>/dev/null)
@@ -224,6 +275,15 @@ else
         note "--period-frames/--periods, the tuning above, and PGO"
         note "(see the Performance section of README.md)."
     fi
+fi
+
+# --------------------------------------------------------------- sound ----
+if [ "$FULL" -eq 1 ] && [ -n "$ROMS" ] && [ -d "$ROMS" ] && [ "${cards:-0}" -gt 0 ]; then
+    head2 "Selftest"
+    say "  Playing 20 s of the stress sequence to the default device."
+    say "  If you hear nothing, the problem is the audio path, not the emulator."
+    say ""
+    "$BUILD/sc55d" --roms "$ROMS" --gs --selftest 20 2>&1 | sed 's/^/  /'
 fi
 
 # -------------------------------------------------------------- summary ----

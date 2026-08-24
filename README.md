@@ -63,18 +63,50 @@ oversampling off. sc55d opens the ALSA device at that rate through the plug
 layer and lets ALSA resample; `--audio-device` picks something other than
 `default` (`aplay -L` lists them).
 
-Latency is `--period-frames` × `--periods`; the defaults (256 × 3) are about
-11.6 ms at 66207 Hz. Raise `--periods` if the log shows xruns — each one is
-reported as it happens and the total is printed at shutdown.
+Buffer latency is `--period-frames` × `--periods`; the defaults (256 × 3) are
+about 11.6 ms at 66207 Hz. `--render-ahead <n>` adds another `n` periods on top
+of that, because the renderer is working that far in front of the speaker.
+Raise `--periods` if the log shows xruns — each one is reported as it happens
+and the total is printed at shutdown.
 
-`--cpu <n>` pins the render thread to one core. sc55d also calls `mlockall()`
-and asks for `SCHED_FIFO` (priority 70, `--priority` to change); both are best
-effort and warn rather than fail without privileges. `--no-realtime` skips them.
+`--render-ahead <n>` is what lets sc55d use a second core: the render thread
+fills a ring of `n` periods while the output thread blocks in ALSA. `0` puts
+both back on one thread for the lowest possible latency, and is the default on
+a single-core machine, where a ring only buys a mutex, a condition variable and
+a period of latency.
+
+The default is **a fixed ~15 ms** rather than a fixed number of periods — 8 at
+128 frames, 4 at 256, 2 at 512. That is not arbitrary. The stalls a ring exists
+to absorb are scheduling artefacts, and they last a fixed number of
+milliseconds no matter how you have sized your periods; measured over 80
+minutes of rendered audio here, the emulator's *own* worst period never
+exceeded 0.8x of its budget, while the worst observed period was 4–70 ms at
+every period size, and an emulator-free control loop on the same machine
+stalled by the same amounts. So the useful depth is an amount of time, and the
+period count that takes scales with `1/period-frames`. At shutdown sc55d
+prints how many times the output thread found the ring empty ("starves") and
+how close it came at the worst moment; a non-zero starve count means the core is
+genuinely too slow here, not that something interrupted it.
+
+`--cpu <n>` pins the render thread to one core and `--output-cpu <n>` the output
+thread. sc55d also calls `mlockall()` and asks for `SCHED_FIFO` (renderer at
+priority 70, `--priority` to change); both are best effort and warn rather than
+fail without privileges. `--no-realtime` skips them.
 
 The emulator's own log messages are capped at 100 (`--core-log-limit`, 0 for no
 cap) and `--quiet-core` silences them. This is not cosmetic: a ROM the core is
 unhappy with can emit millions of messages per second, and on a real device that
 flood alone will cause xruns.
+
+`--selftest <seconds>` plays the benchmark's sixteen-part stress sequence to the
+audio device in realtime, through the same MIDI queue the sequencer feeds. It is
+the quickest way to answer the first question anyone has on a fresh box — *does
+this thing make a sound?* — without setting up `aconnect` and a MIDI file
+player:
+
+```bash
+sc55d --roms /path/to/roms --gs --selftest 20
+```
 
 `SIGINT`/`SIGTERM` shut it down cleanly. Full options: `sc55d --help`.
 
@@ -168,9 +200,44 @@ any one second of the run. The average can hide a stall that would be an xrun in
 real use. At or above 1.0x holds realtime; the exit status is 0 when it does and
 1 when it does not.
 
+A one-second warm-up is not enough with real ROMs — the firmware has not booted
+and the run measures silence, which the digest line flags as `(SILENT)`. The
+default is 4 s (`--bench-warmup`).
+
 Run it the way the daemon will run: same `--cpu`, same `--model`, same
 privileges. And compare like with like — the ratio moves several-fold with build
 flags, so re-benchmark after changing them.
+
+**Run it with `--no-realtime`.** Under `SCHED_FIFO` the benchmark saturates its
+core, which is exactly what the kernel RT throttle punishes: the tail of the
+distribution then measures the throttle rather than the emulator. See
+[System tuning](#system-tuning).
+
+#### Where the time goes within a period
+
+`--bench-histogram` times every individual period and reports the distribution
+against that period's realtime budget:
+
+```
+./build/sc55d --roms /path/to/roms --bench --bench-histogram --no-realtime
+```
+
+It prints mean, median, p90, p99, p99.9 and max as multiples of the budget, how
+many periods went over it, the worst run of consecutive over-budget periods, and
+the **peak cumulative deficit** — the running sum of how far behind realtime the
+renderer fell, floored at zero. That last one is the number that says how deep
+`--render-ahead` has to be, and it is the only one that does: the
+consecutive-run figure reads 1 almost always, because a single 14 ms stall lands
+inside one period rather than spreading across several, and sizing a ring from
+it would give you 2 and be badly wrong.
+
+`--bench-ring` pushes every period through a real `PeriodRing` to a consumer
+thread that discards it, so the cost of the hand-off can be priced against the
+same run without it. Measured here: **10–20 µs per period**, about 0.5% of the
+budget at 256 frames — a 1 KiB memcpy, a mutex pair and one futex wake. It is a
+fixed per-period cost, so it hurts proportionally more at smaller periods
+(0.74% at 128), and on a board running near its limit it eats a larger share of
+what slack is left.
 
 ## Performance
 
@@ -260,22 +327,60 @@ Not every SC-55 costs the same to emulate, and the differences are large:
 ### System tuning
 
 ```bash
+# The kernel RT throttle. This one is not optional.
+sudo sysctl -w kernel.sched_rt_runtime_us=-1
+echo 'kernel.sched_rt_runtime_us=-1' | sudo tee /etc/sysctl.d/99-sc55d.conf
+
 # CPU governor: ondemand ramps, and the ramp is an xrun
 echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 
 # /boot/firmware/cmdline.txt — hand core 3 to sc55d alone, keep IRQs off it
 isolcpus=3 nohz_full=3 rcu_nocbs=3 irqaffinity=0-2
-# then run with --cpu 3
+# then run with --cpu 3 --output-cpu 2
 ```
 
-- **ALSA resampling is not free.** 66207 Hz is not a rate any card supports, so
-  the plug layer converts every sample. The default converter can be one of the
-  Speex ones; `linear` costs a fraction of that:
+- **Turn off the kernel RT throttle.** By default the kernel reserves 50 ms of
+  every second for non-realtime work and simply stops any `SCHED_FIFO` thread
+  that is still runnable when the budget is gone. sc55d's render thread
+  saturates its core precisely when the board is struggling, so the throttle
+  fires exactly when you can least afford it — and 50 ms is far longer than any
+  sensible audio buffer, so every occurrence is an xrun. This is not
+  speculation: a CPU-saturating `SCHED_FIFO` loop containing no emulator at
+  all, measured here, stalls up to 54 ms roughly once a second; the same loop
+  at normal priority never exceeds 1.6 ms. sc55d warns at startup if the
+  throttle is on.
+
+- **Give the renderer a core and the output thread a different one.** That is
+  what `--render-ahead` exists to exploit; putting both on the isolated core
+  gets you the serial behaviour back with extra latency. The output thread is
+  cheap enough to share core 2 with the rest of the system.
+
+- **Pick the rate converter.** 66207 Hz is not a rate any card supports, so the
+  plug layer converts every sample — and it does that work *inside
+  `snd_pcm_writei()`*, on the output thread, which is the other reason that
+  thread wants its own core. Measured here, one 256-frame period against a
+  3867 µs budget:
+
+  | `defaults.pcm.rate_converter` | per period | of one core |
+  |---|---|---|
+  | `linear`          |   2.4 µs |  0.06% |
+  | `lavrate`         |   5.9 µs |  0.15% |
+  | `speexrate`       |  37.4 µs |  0.97% |
+  | (unset)           |  38.0 µs |  0.98% |
+  | `samplerate`      |  60.2 µs |  1.56% |
+  | `speexrate_best`  | 255.9 µs |  6.62% |
+  | `samplerate_best` | 469.9 µs | 12.15% |
 
   ```
   # /etc/asound.conf
-  defaults.pcm.rate_converter "linear"
+  defaults.pcm.rate_converter "lavrate"
   ```
+
+  `lavrate` is the one to use: 6x cheaper than the default and far better than
+  `linear`, which is cheapest but audibly so — plain linear interpolation of a
+  66 kHz source aliases. Avoid both `_best` variants; on a Pi 3 they would cost
+  more than the whole rest of the output path. These are x86 numbers, so read
+  the *ratios*, not the absolute microseconds.
 
 - **Avoid the 3.5 mm jack.** It is PWM-driven, sounds poor, and adds work. An
   I²S DAC HAT or a USB DAC is better on both counts.
@@ -289,9 +394,12 @@ isolcpus=3 nohz_full=3 rcu_nocbs=3 irqaffinity=0-2
 ### Core patches
 
 `patches/` holds thirteen performance patches applied at build time to a copy of
-the core; the submodule itself is never modified. They are **on by default**,
-validated bit-identical against 30 seconds of real SC-55mk2 audio, and each has
-a ROM-free equivalence test. `-DSC55D_PATCH_CORE=OFF` disables them.
+the core; the submodule itself is never modified. They are **on by default** and
+**pass all 36 of upstream's own SC-55mk2 integration cases** — real MIDI files
+with published expected SHA-256 hashes of the rendered audio, an absolute
+reference rather than a comparison against ourselves. Each patch also has a
+ROM-free equivalence test with deliberate mutants. `-DSC55D_PATCH_CORE=OFF`
+disables them.
 
 Romsets other than the mk2 family are **not** validated — no ROMs for them were
 available. If you run one, especially the JV-880, run
@@ -334,12 +442,39 @@ optimising anything else.
 
 ### Known ceiling
 
-sc55d renders and writes on one thread, so the ALSA buffer is the only slack: a
-scheduling hiccup longer than the buffer is an xrun even when the average ratio
-is comfortable. If `--bench` says a board is near 1.0x, more buffer is the first
-answer; a render-ahead design (non-blocking writes, rendering in sub-period
-chunks between `snd_pcm_avail()` checks) would absorb jitter at the cost of MIDI
-latency, and is the obvious next change if buffering is not enough.
+The thing render-ahead cannot do is make the core faster. It converts spare
+cores into *tolerance of jitter*, nothing else: the render thread runs
+continuously on one core while the output thread blocks in ALSA on another, and
+the queued periods absorb a hiccup that would otherwise have been an xrun.
+
+So there are two different failure modes, and sc55d now tells them apart. If
+the shutdown line reports **starves**, the ring ran dry: the core is not
+sustaining realtime on this board and no amount of buffering will fix it —
+that is a `--bench` problem, and the answers are the patches, the build flags,
+a cheaper romset, or a faster board. If there are **xruns but no starves**, the
+audio path was late while the renderer was keeping up, and more buffer
+(`--periods`, `--render-ahead`) or better isolation is the answer.
+
+**A ring recovers more slowly the closer the board is to its limit**, which is
+the part that does not show up on a fast machine. The ring refills at
+`1/r − 1` periods per period, where `r` is how much of its budget a period
+costs. On this x86 host at `r = 0.25` it refills at 0.75 periods per period; at
+`r = 0.90` it refills at 0.10. The *same* stall therefore takes about seven
+times longer to pay back on a board near 1.0x, and a second stall arriving
+inside that window stacks on the first. So a deeper ring is worth less on a
+struggling board than the arithmetic suggests, and headroom in the core is
+worth more.
+
+That is also why the RT throttle cannot be buffered away. A 50 ms hole at 256
+frames needs 13 periods of ring to survive; the 262 ms stall recorded here
+needs 68. No sane depth covers that — the `sysctl` does.
+
+Beyond that: a single instance is strictly serial. The MCU, sub-MCU and PCM
+chip are cycle-coupled per instruction, so the emulation itself cannot be split
+across cores, and running several instances does not help a board that is short
+— each one has to hit realtime independently, so N copies at 0.6x are still
+0.6x. What is left is making the core cheaper, and `patches/README.md` records
+what has been tried.
 
 ## Testing on a Raspberry Pi
 
@@ -354,9 +489,17 @@ cd sc55d
 It reports the model and whether the userland is 64-bit, picks `-mcpu` from the
 CPU part number, builds, runs the patch equivalence tests, then checks the
 things that actually decide whether audio glitches — cpufreq governor,
-throttling flags, `isolcpus`, the RTPRIO limit, whether an ALSA device exists —
-and finishes with the benchmark. It changes nothing; it only tells you what to
-change. Without `--roms` it does everything except the benchmark.
+throttling flags, core count, `isolcpus`, the RTPRIO limit, whether an ALSA
+device exists — and finishes with the benchmark. It changes nothing; it only
+tells you what to change. Without `--roms` it does everything except the
+benchmark.
+
+`--full` adds two things: sc55d's own thread-safety tests, and — if ROMs and an
+audio device are both present — 20 seconds of `--selftest` played to the default
+device, so the run ends with the board actually making a noise. The tests take a
+few minutes because of the ThreadSanitizer builds, but the Pi is the interesting
+place to run them: they exist to catch memory-ordering bugs that x86 is too
+strongly ordered to exhibit.
 
 **A Pi 3 needs the 64-bit image.** The core counts cycles in `uint64_t`
 throughout and a 32-bit armhf userland pays for every one of them. The script
@@ -378,17 +521,42 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSC55D_CPU=cortex-a53 \
 
 ### What has been verified off-board
 
-Short of a real Pi, the following were checked here:
+Short of a real Pi, the following were checked here, on x86-64 with a real
+`mk2-v1.01` ROM set:
 
-- Builds and runs correctly cross-compiled for **`-mcpu=cortex-a53`** and
-  executed on aarch64 (`cmake/aarch64-linux-gnu.cmake` is the toolchain file).
-- Both patch equivalence tests pass compiled for A53 and run on aarch64.
-- Builds with **GCC 12**, which is what Raspberry Pi OS Bookworm ships — the
+- **Emulation accuracy.** The patched core reproduces all 36 of upstream's own
+  SC-55mk2 integration cases, byte for byte against their published SHA-256
+  hashes. See `patches/README.md`.
+- **Cross-architecture agreement.** Cross-compiled for `-mcpu=cortex-a53`
+  (`cmake/aarch64-linux-gnu.cmake`) and run on aarch64, the benchmark produces
+  a digest identical to the x86-64 build on the same workload — with the
+  threading changes in place.
+- **Thread safety.** The period ring and the MIDI queue each have a test that
+  drives them from two threads and verifies every period and every byte
+  arrives exactly once, in order, uncorrupted — run under ThreadSanitizer and
+  under ASan/UBSan, each with a set of deliberate mutants that the test is
+  required to kill. `tests/`. The whole daemon also runs clean under
+  ThreadSanitizer against ALSA's `null` device.
+- **Patch equivalence tests** pass compiled for A53 and run on aarch64.
+- **Builds with GCC 12**, which is what Raspberry Pi OS Bookworm ships — the
   core requires C++23, so that was worth confirming.
 
-What has *not* been verified is anything about speed on real hardware, or the
-audio path, since there are no ROMs and no sound device here. The benchmark on
-your Pi is the only number that settles whether this works.
+What has *not* been verified here, and what a Pi is needed for:
+
+- **Speed on real hardware.** Every performance figure in this README is
+  x86-64. The ratios transfer; the absolute headroom does not. `--bench` on
+  your Pi is the only number that settles whether this works.
+- **The audio path to a real card** — there is no sound device on the machine
+  this was developed on, so xruns, the plug layer against real hardware and
+  `snd_pcm_writei()` pacing are all untested outside the `null` and `file`
+  plugins.
+- **The MIDI path from a real sequencer client.** There is no `/dev/snd/seq`
+  here, so the ALSA sequencer decoding in `midi_in.cpp` is reviewed, not
+  executed. Everything downstream of it *is* exercised: `--selftest` injects
+  into the same queue from a non-render thread, and a 15-second run with 2570
+  events produces real audio (peak 0.59 FS) and reports no ThreadSanitizer
+  findings.
+- **Romsets other than the mk2 family** — no ROMs were available for them.
 
 ## Installing as a service
 
@@ -415,23 +583,69 @@ and `LimitMEMLOCK` are what let an unprivileged process get `SCHED_FIFO` and
 ## How it fits together
 
 ```
-ALSA sequencer ──► midi_in.cpp ──► Emulator::PostMIDI() ──► emulated serial port
-                                                                   │
-                   main.cpp render loop ──► Emulator::Step() ──────┤ Nuked-SC55
-                                                                   │
-ALSA pcm  ◄── audio_out.cpp ◄── Core::Frames() ◄── sample callback ┘
+   (MIDI thread)   ALSA sequencer ──► midi_in.cpp ──► midi_queue.cpp
+                                                            │
+   ─────────────────────────────────────────────────────────┼───────────────
+                                                            ▼
+   (render thread)  main.cpp ──► Emulator::PostMIDI() ──► emulated serial port
+                        │                                          │
+                        ├───────► Emulator::Step() ────────────────┤ Nuked-SC55
+                        │                                          │
+                        │            Core::Frames() ◄── sample callback
+                        ▼
+                     ring.cpp  ── N periods ──┐
+   ─────────────────────────────────────────  │  ──────────────────────────
+                                              ▼
+   (output thread)              audio_out.cpp ──► snd_pcm_writei() ──► ALSA pcm
 ```
 
-One thread renders and writes: it steps the core until a period of frames is
-ready, hands that period to `snd_pcm_writei()`, and repeats. The blocking write
-paces the emulation — no timers, no drift. MIDI decoding runs on its own thread
-and posts raw bytes into the core's UART FIFO.
+Three threads, and exactly two places where data crosses between them: the MIDI
+queue and the period ring.
+
+**MIDI** decodes sequencer events into raw bytes and puts them in the queue.
+**Render** takes them out, hands them to the emulated serial port, steps the
+core until a period of frames is ready, and drops that period into the ring.
+**Output** takes periods off the ring and blocks in `snd_pcm_writei()`.
+
+Only the render thread ever calls into the emulator, and that is deliberate.
+The core's own UART FIFO is a single-producer ring with no synchronisation at
+all — `MCU_PostUART()` stores the byte and then bumps the pointer, both plain
+stores, while the core polls the pointer and then reads the byte, both plain
+loads. Posting to it from a MIDI thread, which is what upstream's RtMidi
+callback does, is a data race, and on a weakly ordered Cortex-A53 a real one:
+the core can see the advanced pointer before the byte it points at and take
+whatever was in that slot the previous lap of the 8 KiB buffer. A corrupted
+status byte is a stuck note — rare, silent and miserable to find. Putting a
+properly synchronised queue in front of it makes the core's FIFO what it was
+always written as: single-threaded. `patches/README.md` has the measurement
+that says why this is not fixed inside the core instead.
+
+The blocking write still paces everything — no timers, no drift — but now it
+paces the renderer *through* the ring rather than by standing in front of it.
+That is the whole point: on a multi-core board the render thread keeps working
+while the output thread is asleep in ALSA, and the periods queued between them
+absorb a late wake-up instead of turning it into an xrun. It does not make the
+emulator faster. If the core cannot sustain realtime on average the ring simply
+drains, which sc55d counts and reports as *starves* — the number that tells you
+"this board is too slow" apart from "this board was interrupted".
+
+`--render-ahead 0` collapses render and output back into one thread, which is
+lower latency and the only thing that makes sense on a single core.
 
 The core hands finished frames to a sample callback, which clamps them to 16-bit
 and appends to a small linear buffer. Because the loop only steps until one
 period is ready, and one instruction yields at most two frames, that buffer never
-holds much more than a period — so there is no ring, no wrap handling, and the
-bytes go to ALSA without another copy.
+holds much more than a period. One `memcpy` moves it into a ring slot; at the
+default settings that is a few hundred KiB a second, and it is cheaper than
+teaching the callback to cope with a slot boundary landing mid-instruction.
+
+Thread priorities, highest first: output, MIDI, render. The output thread must
+never miss a wake-up, and its work is bounded and small — the plug layer's rate
+conversion, which happens inside `snd_pcm_writei()` and is measured under
+[System tuning](#system-tuning) below. MIDI is idle until an event arrives and
+only adds latency if made to wait. The renderer wants every cycle it can get, so
+it goes last. `--priority` sets the renderer's; the other two sit one and two
+steps above it.
 
 ### Why this fork
 
@@ -466,6 +680,7 @@ docs/                   design and optimisation notes
 patches/                core patches, applied at build time
 scripts/                pi-check.sh, validate-patches.sh
 src/                    everything sc55d adds
+tests/                  tests for sc55d's own code, each with its mutants
 vendor/nuked-sc55/      the emulation core, unmodified (submodule)
 ```
 

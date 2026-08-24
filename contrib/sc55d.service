@@ -6,12 +6,22 @@ Wants=sound.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/sc55d --roms /usr/share/sc55d/roms --audio-device default --period-frames 256 --periods 3 --cpu 3
+# --cpu is the render thread, --output-cpu the one that blocks in ALSA: on a
+# four-core Pi they want to be different cores, which is the whole reason
+# --render-ahead exists.
+ExecStart=/usr/bin/sc55d --roms /usr/share/sc55d/roms --audio-device default \
+    --period-frames 256 --periods 3 --render-ahead 4 --cpu 3 --output-cpu 2
 Restart=always
 RestartSec=2
 
-# SCHED_FIFO on the render thread and mlockall(). Drop these two limits (and
-# pass --no-realtime) if the unit should run unprivileged.
+# SCHED_FIFO on the render, MIDI and output threads, and mlockall(). Drop these
+# two limits (and pass --no-realtime) if the unit should run unprivileged.
+#
+# These are not enough on their own: the kernel RT throttle stops a saturating
+# SCHED_FIFO thread for 50 ms out of every second, which is an xrun every time.
+# A unit cannot set that itself, so install the sysctl too:
+#   echo 'kernel.sched_rt_runtime_us=-1' > /etc/sysctl.d/99-sc55d.conf
+# sc55d warns at startup if it is still enabled.
 LimitRTPRIO=80
 LimitMEMLOCK=infinity
 

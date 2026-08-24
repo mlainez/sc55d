@@ -13,9 +13,13 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <thread>
 #include <vector>
 
 #include "core.h"
+#include "ring.h"
 #include "rt.h"
 
 namespace Bench {
@@ -45,12 +49,6 @@ struct Digest {
             value *= 1099511628211ull;
         }
     }
-};
-
-struct Event {
-    uint64_t frame;
-    uint8_t data[3];
-    uint8_t length;
 };
 
 void Add(std::vector<Event> &events, uint64_t frame, uint8_t a, uint8_t b, uint8_t c)
@@ -129,6 +127,111 @@ std::vector<Event> BuildSequence(double seconds, int rate)
     return events;
 }
 
+/* CLOCK_MONOTONIC rather than steady_clock's default: the histogram is about
+ * scheduling behaviour, so it wants the same clock the kernel schedules on and
+ * a call cheap enough (vDSO, no syscall) to sit inside the render loop. */
+uint64_t NowNs()
+{
+    timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
+}
+
+/* Nearest-rank, on an already sorted vector.  With tens of thousands of
+ * samples the difference from an interpolating definition is far below the
+ * run-to-run noise, and this cannot index past the end. */
+uint64_t Percentile(const std::vector<uint64_t> &sorted, double fraction)
+{
+    if (sorted.empty())
+        return 0;
+    size_t rank = (size_t)(fraction * (double)sorted.size());
+    if (rank >= sorted.size())
+        rank = sorted.size() - 1;
+    return sorted[rank];
+}
+
+/* `period_ns` must still be in render order: the burst and deficit numbers
+ * below are about when the slow periods happened, not just how many. */
+void PrintTimingHistogram(const std::vector<uint64_t> &period_ns, int page, int rate)
+{
+    if (period_ns.empty())
+        return;
+
+    const double budget_ns = 1e9 * (double)page / (double)rate;
+
+    /* A single late period is harmless: the next early one pays it back out of
+     * the ring.  What actually drains the ring is a run of them, so count the
+     * longest unbroken run -- and, more directly, track the running deficit in
+     * periods, floored at zero because a ring that is already full cannot get
+     * any fuller.  The peak of that deficit is the depth the ring must have. */
+    size_t over = 0;
+    size_t run = 0;
+    size_t worst_run = 0;
+    size_t worst_index = 0;
+    uint64_t worst_ns = 0;
+    double backlog = 0.0;
+    double worst_backlog = 0.0;
+    double total_ns = 0.0;
+
+    for (size_t i = 0; i < period_ns.size(); i++)
+    {
+        const uint64_t ns = period_ns[i];
+        total_ns += (double)ns;
+
+        /* Where the worst period fell separates a startup cost that the ring
+         * only has to survive once from a stall that can happen again. */
+        if (ns > worst_ns)
+        {
+            worst_ns = ns;
+            worst_index = i;
+        }
+
+        if ((double)ns > budget_ns)
+        {
+            over++;
+            run++;
+            if (run > worst_run)
+                worst_run = run;
+        }
+        else
+        {
+            run = 0;
+        }
+
+        backlog += ((double)ns - budget_ns) / budget_ns;
+        if (backlog < 0.0)
+            backlog = 0.0;
+        if (backlog > worst_backlog)
+            worst_backlog = backlog;
+    }
+
+    std::vector<uint64_t> sorted = period_ns;
+    std::sort(sorted.begin(), sorted.end());
+
+    printf("\n");
+    printf("  period        %d frames = %.3f ms of audio\n", page, budget_ns / 1e6);
+    printf("  timed         %zu periods\n", period_ns.size());
+    printf("  render time per period, as a ratio of that budget:\n");
+
+    auto line = [&](const char *name, double ns) {
+        printf("    %-8s    %7.4fx  (%8.4f ms)\n", name, ns / budget_ns, ns / 1e6);
+    };
+    line("mean", total_ns / (double)period_ns.size());
+    line("median", (double)Percentile(sorted, 0.50));
+    line("p90", (double)Percentile(sorted, 0.90));
+    line("p99", (double)Percentile(sorted, 0.99));
+    line("p99.9", (double)Percentile(sorted, 0.999));
+    line("max", (double)sorted.back());
+
+    printf("  over budget   %zu of %zu periods (%.4f%%)\n", over, period_ns.size(),
+           100.0 * (double)over / (double)period_ns.size());
+    printf("  worst burst   %zu consecutive periods over budget\n", worst_run);
+    printf("  worst period  #%zu of %zu (%.1f%% into the run)\n", worst_index,
+           period_ns.size(), 100.0 * (double)worst_index / (double)period_ns.size());
+    printf("  worst deficit %.2f periods behind realtime at the worst moment\n",
+           worst_backlog);
+}
+
 /* Renders `frames` frames, posting `events` as their time arrives.  Returns the
  * number of frames actually rendered (short only if interrupted). */
 uint64_t Render(uint64_t frames, const std::vector<Event> *events, Digest *digest)
@@ -159,14 +262,23 @@ uint64_t Render(uint64_t frames, const std::vector<Event> *events, Digest *diges
 
 } // namespace
 
-int Run(double seconds, double warmup_seconds)
+std::vector<Event> Sequence(double seconds, int rate)
+{
+    return BuildSequence(seconds, rate);
+}
+
+int Run(const Options &options)
 {
     const int rate = Core::SampleRate();
     const int page = Core::PageFrames();
 
     printf("sc55d: benchmark: %.0f s of audio at %d Hz "
            "(after %.0f s of warm-up), output discarded\n",
-           seconds, rate, warmup_seconds);
+           options.seconds, rate, options.warmup_seconds);
+    if (options.ring_slots > 0)
+        printf("sc55d: benchmark: each period handed through a %d-slot ring to a "
+               "consumer thread that discards it\n",
+               options.ring_slots);
     fflush(stdout);
 
     /* Let the firmware boot and settle before the clock starts. A real SC-55
@@ -174,13 +286,34 @@ int Run(double seconds, double warmup_seconds)
      * simply dropped -- which shows up as a silent run rather than an error,
      * so the default here is deliberately generous. */
     Core::PostReset(Core::Reset::GS);
-    Render((uint64_t)(warmup_seconds * rate), nullptr, nullptr);
+    Render((uint64_t)(options.warmup_seconds * rate), nullptr, nullptr);
 
-    const std::vector<Event> events = BuildSequence(seconds, rate);
+    const std::vector<Event> events = BuildSequence(options.seconds, rate);
 
-    const uint64_t total_frames = (uint64_t)(seconds * rate);
+    const uint64_t total_frames = (uint64_t)(options.seconds * rate);
     const uint64_t chunk_frames = (uint64_t)rate; // report the worst second
     const int page_count = std::max(1, (int)(chunk_frames / (uint64_t)page));
+
+    /* Preallocated: a reallocation partway through would land inside a timed
+     * period and be recorded as a spike that is ours, not the core's. */
+    std::vector<uint64_t> period_ns;
+    if (options.histogram)
+        period_ns.reserve((size_t)(total_frames / (uint64_t)page) + 2);
+
+    /* Same ring the daemon uses, driven the same way, so what it adds to a
+     * period here is what it adds to a period there. */
+    PeriodRing ring;
+    std::thread consumer;
+    if (options.ring_slots > 0)
+    {
+        ring.Init((unsigned)options.ring_slots, (unsigned)page);
+        consumer = std::thread([&ring] {
+            Rt::BlockSignals();
+            Rt::NameThread("sc55d-sink");
+            while (ring.BeginRead())
+                ring.CommitRead();
+        });
+    }
 
     Digest digest;
     size_t next_event = 0;
@@ -200,11 +333,35 @@ int Run(double seconds, double warmup_seconds)
             Core::PostMidi(event.data, event.length);
         }
 
+        /* Posting MIDI and hashing the output are the benchmark's own work --
+         * in the daemon the first belongs to another thread and the second
+         * does not exist -- so the timed window skips over both and covers
+         * only what the render thread actually does per period. */
+        const uint64_t core_started = options.histogram ? NowNs() : 0;
         while (Core::FramesReady() < (size_t)page)
             Core::Step();
+        const uint64_t core_ended = options.histogram ? NowNs() : 0;
 
         digest.Add(Core::Frames(), page);
-        Core::Consume(page);
+
+        const uint64_t tail_started = options.histogram ? NowNs() : 0;
+        if (options.ring_slots > 0)
+        {
+            int16_t *slot = ring.BeginWrite();
+            if (!slot)
+                break;
+            memcpy(slot, Core::Frames(), (size_t)page * 2 * sizeof(int16_t));
+            Core::Consume(page);
+            ring.CommitWrite();
+        }
+        else
+        {
+            Core::Consume(page);
+        }
+
+        if (options.histogram)
+            period_ns.push_back((core_ended - core_started) + (NowNs() - tail_started));
+
         rendered += (uint64_t)page;
         chunk_rendered += (uint64_t)page;
 
@@ -225,6 +382,13 @@ int Run(double seconds, double warmup_seconds)
 
     const double wall = std::chrono::duration<double>(
                             std::chrono::steady_clock::now() - started).count();
+
+    if (consumer.joinable())
+    {
+        ring.Shutdown();
+        consumer.join();
+    }
+
     const double rendered_seconds = (double)rendered / rate;
     const double ratio = wall > 0.0 ? rendered_seconds / wall : 0.0;
 
@@ -241,6 +405,10 @@ int Run(double seconds, double warmup_seconds)
         printf("\n  warning: the run produced no audio at all, so the digest is the\n"
                "           digest of silence and compares equal between any two builds.\n"
                "           Do not use it to check a change to the emulator.\n");
+
+    if (options.histogram)
+        PrintTimingHistogram(period_ns, page, rate);
+
     printf("\n");
     printf("  verdict       %s\n",
            (have_worst ? worst_ratio : ratio) >= 1.0

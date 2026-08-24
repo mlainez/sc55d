@@ -119,6 +119,10 @@ bool Write(const int16_t *frames, unsigned count)
         {
             if (written == -EAGAIN)
                 continue;
+            /* A signal cut the write short: not an error, just a chance for
+             * the caller to look at the quit flag. */
+            if (written == -EINTR)
+                return true;
             if (!Recover((int)written))
                 return false;
             /* The period we were writing is gone with the xrun; drop it rather

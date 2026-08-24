@@ -1,8 +1,12 @@
 /*
  * ALSA sequencer MIDI input.  Sequencer events are decoded back into the raw
- * MIDI byte stream and handed to the core one byte at a time, exactly as
- * upstream's RtMidi callback does -- the emulated MCU reads them off its
- * serial port.
+ * MIDI byte stream and fed to the emulated MCU's serial port one byte at a
+ * time, exactly as a real SC-55 would receive them.
+ *
+ * They do not go into the core from here, though.  This runs on its own
+ * thread, and the core's UART FIFO is not safe to write from a second one --
+ * see midi_queue.h.  Bytes go into that queue instead, and the render thread
+ * takes them out with DrainToCore().
  */
 #include "midi_in.h"
 
@@ -11,7 +15,7 @@
 #include <cstdio>
 #include <vector>
 
-#include "core.h"
+#include "midi_queue.h"
 
 namespace MidiIn {
 namespace {
@@ -23,6 +27,8 @@ const size_t kDecodeBufferSize = 8192;
 snd_seq_t *g_seq = nullptr;
 snd_midi_event_t *g_parser = nullptr;
 int g_port = -1;
+
+MidiQueue g_queue;
 
 } // namespace
 
@@ -89,7 +95,7 @@ void Run(const std::atomic<bool> &quit)
             long length = snd_midi_event_decode(g_parser, bytes.data(),
                                                 (long)bytes.size(), event);
             if (length > 0)
-                Core::PostMidi(bytes.data(), (size_t)length);
+                g_queue.Push(bytes.data(), (size_t)length);
             else if (length == -ENOMEM)
                 fprintf(stderr, "sc55d: dropped an oversized MIDI message\n");
 
@@ -97,6 +103,21 @@ void Run(const std::atomic<bool> &quit)
                 break;
         }
     }
+}
+
+size_t DrainToCore()
+{
+    return g_queue.Drain();
+}
+
+unsigned long Dropped()
+{
+    return g_queue.Dropped();
+}
+
+void Inject(const uint8_t *data, size_t length)
+{
+    g_queue.Push(data, length);
 }
 
 void Close()

@@ -210,6 +210,8 @@ set(SC55D_SOURCES
     src/core.cpp
     src/main.cpp
     src/midi_in.cpp
+    src/midi_queue.cpp
+    src/ring.cpp
     src/rt.cpp)
 
 # Warnings on our code only; the core has its own warning policy and we do not

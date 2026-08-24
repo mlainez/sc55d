@@ -19,23 +19,41 @@ below for exactly which romsets that covers.
 
 ## Validation status
 
-**The strongest check available is upstream's own.** `test/integration/` in the
-core's own tree carries 36 real MIDI files and, for each, the **expected
-SHA-256 of the rendered audio** — an absolute reference, not a comparison
-against ourselves. 35 of those cases are for `mk2-v1.01`, which is exactly the
-romset here. Running them needs the core's `nuked-sc55-render` target and
-`NUKED_TEST_ROMDIR` pointing at your ROMs; `scripts/validate-patches.sh` does
-not do this, and should be treated as the quick check rather than the real one.
+**The patched core passes all 36 of upstream's own mk2 integration cases.**
+
+That is the strongest check available, and it has now been run. `test/integration/`
+in the core's own tree carries 72 real MIDI files and, for each, the **expected
+SHA-256 of the rendered audio** — an absolute reference published by upstream,
+not a comparison against ourselves. 36 of them are for the SC-55mk2 family (35
+`mk2-v1.01` plus one `mk2`), which is exactly the romset available here.
+
+With all thirteen patches applied and a real `mk2-v1.01` ROM set:
+
+```
+36 mk2 cases from upstream's own test list
+
+PASS 36   FAIL 0
+```
+
+Thirty-six independent SHA-256 matches against hashes we did not choose. This
+is what makes the patch series trustworthy in a way that self-comparison never
+could: a digest that agrees with itself proves only that two builds of ours
+agree, whereas these agree with the reference.
+
+Reproducing it needs the core's `nuked-sc55-render` target and your own ROMs:
 
 ```bash
 cmake -S vendor/nuked-sc55 -B build-render -DCMAKE_BUILD_TYPE=Release
 cmake --build build-render --target nuked-sc55-render
 # then drive test/integration/CMakeLists.txt's (romset, file, sha256) triples
-# through test/integration/test_runner.py
+# through it: --stdout <mid> --rom-directory <dir> --romset <set> --reset gm
+# and compare the SHA-256 of stdout against the triple's third field.
 ```
 
 Note their renderer needs RtMidi present to configure, even though it does not
-use it.
+use it. `scripts/validate-patches.sh` does *not* do any of this — treat it as
+the quick check, and this as the real one. The other 36 cases (`mk1-v1.21` and
+`jv880-v1.0.1`) remain unrun for want of those ROM sets.
 
 
 **Validated: the SC-55mk2 family.** With a real `mk2-v1.01` ROM set, the
@@ -192,3 +210,43 @@ Things measured and thrown away, so nobody repeats them:
   already free, and the table replaced them with a dependent load. Callgrind
   confirmed `PCM_ReadROM` is only 3.4% of instructions. Not worth revisiting
   unless a profile on the target says otherwise.
+
+- **Making the core's UART FIFO thread-safe.** `mcu_t::uart_buffer` with its
+  `uart_write_ptr`/`uart_read_ptr` pair is a single-producer ring with no
+  synchronisation at all: `MCU_PostUART()` stores the byte and then bumps the
+  pointer, both plain stores; `SM_UpdateUART()` polls the pointer and then reads
+  the byte, both plain loads. Posting to it from a MIDI thread — which is what
+  upstream's RtMidi callback does, and what sc55d did until the render-ahead
+  work — is a data race, and on a weakly ordered Cortex-A53 a real one: the core
+  can observe the advanced write pointer before the byte it points at and take
+  whatever was in that slot the previous time round the 8 KiB buffer. A
+  corrupted status byte is a stuck note, and it would be rare, silent and
+  miserable to debug on a Pi.
+
+  The obvious patch makes `uart_write_ptr` a `std::atomic<uint32_t>`, publishes
+  with `memory_order_release`, and polls with a *relaxed* load plus an acquire
+  fence on the rare path where a byte is present — so the fence never runs in
+  the hot loop. It was written and it works: bit-identical audio, digest
+  `b1e9a497433a81fa` unchanged.
+
+  It was still rejected, because GCC's AArch64 backend will not fold an atomic
+  load into an offset addressing mode, even a relaxed one, and will not pair it
+  with the adjacent plain load of `uart_read_ptr`:
+
+  ```
+  plain    ldp w1, w0, [x0, 160]                   # 1 instruction
+  atomic   add x1, x0, 160 ; ldr w1, [x1] ; ldr w0, [x0, 164]   # 3
+  ```
+
+  `__atomic_load_n()` on a plain field generates the same three; `volatile` gets
+  the offset back but gives no ordering, so it does not fix anything. The poll
+  runs once per sub-MCU instruction — measured 14,822,370 times per two seconds
+  of real mk2 audio, against a program total of 8,766,976,430 instructions — so
+  three extra instructions is about **0.51% of the whole program**, paid forever,
+  on the target architecture.
+
+  The fix belongs on our side of the boundary instead. `src/midi_queue.h` is a
+  properly synchronised SPSC byte queue; the render thread drains it and is the
+  only thread that ever calls into the core, so the core's FIFO becomes what it
+  was always written as — single-threaded — and the hot poll keeps its `ldp`.
+  It costs one relaxed load per drain, four times per period.
