@@ -199,6 +199,39 @@ bit-exactness risk, against maybe a third of the runtime, and the biggest single
 hotspot found so far (`TIMER_Clock`) is a scalar algorithmic fix worth 7–13% for
 25 lines.
 
+## Does any of this use more than one core?
+
+Not for a single SC-55, and it cannot.
+
+**One instance is strictly serial.** The MCU, the sub-MCU, the PCM chip and the
+timers are advanced to the same cycle count after every emulated instruction,
+and any of them can be written by the others in between. Splitting them across
+cores would need a synchronisation barrier roughly every 12 emulated cycles,
+which costs far more than the work being parallelised. This is the same coupling
+that rules out a JIT and GPU offload.
+
+**sc55d uses two threads today**: the render-and-output thread, and the ALSA
+sequencer thread, which is nearly idle — it wakes on a MIDI event, decodes a few
+bytes and sleeps. So one core does essentially all the work, and on a four-core
+Pi the other three are idle.
+
+**The fork does support multiple instances, each on its own thread** — up to 16,
+with `StartThread()`/`JoinThread()` per instance and MIDI routed per instance or
+broadcast. That is genuine multi-core use, but it is *N independent SC-55s*, not
+one faster SC-55: each has its own 24-voice pool and its own effects. It raises
+polyphony past what the hardware could do, which is a deliberate departure from
+authenticity rather than an optimisation.
+
+Crucially, **it does not help a board that is short of realtime.** Every
+instance must individually keep up with the audio clock; two instances at 0.6x
+are still 0.6x. Multi-instance is for when one instance already holds realtime
+and you want more voices than a real SC-55 had.
+
+What a second core *could* usefully do is absorb jitter rather than add
+throughput — a render-ahead thread decoupling the emulation from
+`snd_pcm_writei()`, as described under **Known ceiling** in the README. That
+buys tolerance to scheduling hiccups at the cost of MIDI latency, not headroom.
+
 ## JIT, virtualisation, and off-the-shelf CPU cores
 
 The instinct is right — interpreting a CPU is slow, and dynamic recompilation is

@@ -63,6 +63,48 @@ straight through and skip that step.
 **`get_next_frame()`** is a pull model. The render loop gets simpler: no
 instruction stepping, no frame accounting, no sample callback.
 
+## Confirmed working with a real mk2 set
+
+Not theory any more. libEmuSC was built here **standalone, without Qt** — the
+Qt dependency belongs to the desktop app, not the library — and pointed at the
+same SC-55mk2 ROMs used everywhere else in this repository:
+
+```
+control ROM loaded: model=SC-55mkII version=1.01 date=1993-7-23
+wave ROM loaded
+libEmuSC: GS sound map initialized
+synth up at 48000 Hz
+rendered 48000 frames: 48000 non-silent, peak 0.0455
+```
+
+It identifies the control ROM by model and build date, takes the wave ROMs, and
+renders audio from a bare note-on. The file mapping is direct: `ControlRom` takes
+the control ROM (`rom2`) plus the CPU ROM (`rom1`), and `WaveRom` takes the PCM
+ROMs. Nothing needed converting.
+
+That removes the largest unknown. What remains is engineering, not discovery.
+
+## Comparing it against Nuked, concretely
+
+The core's own `test/integration/` gives the raw material: 36 real MIDI files
+with reference audio hashes, 35 of them for `mk2-v1.01`. Rendering the same
+files through both engines is the honest way to size the fidelity gap, rather
+than arguing from the README's warning.
+
+Two things make it more than a diff:
+
+- **They render at different rates.** Nuked is fixed at the hardware's 66207 Hz;
+  libEmuSC renders at whatever you ask. One side has to be resampled before
+  comparison, and the resampler must not be the thing you end up measuring.
+- **They will never be bit-identical** — that is the entire point. So the metric
+  has to be perceptual or spectral: per-instrument spectral distance, envelope
+  shape, noise floor. A hash tells you nothing except "different", which is
+  already known.
+
+The useful output is not a score but a list: *which* instruments and which
+articulations diverge audibly. That is directly actionable against the gap list
+above, and it is the same artefact upstream would need to fix them.
+
 ## What the port would touch
 
 sc55d was built with the emulator behind a thin `Core` interface, so the blast
