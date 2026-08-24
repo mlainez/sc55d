@@ -273,7 +273,7 @@ else
         warn "does NOT hold realtime on this board as configured"
         note "Try: --model scb55 (no sub-MCU, ~12% cheaper), larger"
         note "--period-frames/--periods, the tuning above, and PGO"
-        note "(see the Performance section of README.md)."
+        note "(see docs/performance.md)."
     fi
 fi
 

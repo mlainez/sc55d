@@ -229,7 +229,7 @@ and you want more voices than a real SC-55 had.
 
 What a second core *could* usefully do is absorb jitter rather than add
 throughput — a render-ahead thread decoupling the emulation from
-`snd_pcm_writei()`, as described under **Known ceiling** in the README. That
+`snd_pcm_writei()`, as described under **Known ceiling** in [`performance.md`](performance.md#known-ceiling). That
 buys tolerance to scheduling hiccups at the cost of MIDI latency, not headroom.
 
 ## JIT, virtualisation, and off-the-shelf CPU cores
@@ -387,7 +387,7 @@ sudo apt install libasound2-plugins
 Which is best is a measurement on your board, not a matter of opinion — the
 right one is the cheapest whose artefacts you cannot hear at 66207 → 48000.
 Measure with the daemon running and watch the xrun count, since this cost lands
-on the same thread as the emulation. The README's blunt advice to use `linear`
+on the same thread as the emulation. [`performance.md`](performance.md#system-tuning)'s blunt advice to use `linear`
 is the safe floor; a NEON `lavrate_fast` may well give better quality for
 similar cost.
 
@@ -512,7 +512,7 @@ Ranked by measured evidence rather than novelty:
 2. **Build flags** — LTO (+8.9% without it) and `-O3` (+11.5% at `-O2`) are
    already the defaults and are worth having. PGO measured at only −1.3% and
    inverts on an untrained workload; the cheap flags measure at exactly zero.
-   Table in the README.
+   Table in [`performance.md`](performance.md#build-flags).
 3. **`patches/0001`** — `TIMER_Clock` closed-form advancement. 2295M → 38M
    retired instructions. Differential test plus 9/9 mutants; real-ROM audio
    still unchecked.

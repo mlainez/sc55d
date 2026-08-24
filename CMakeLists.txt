@@ -67,7 +67,8 @@ if(SC55D_CPU)
     endif()
 endif()
 
-# PGO wants a representative workload: --bench is exactly that. See README.
+# PGO wants a representative workload: --bench is exactly that. See
+# docs/performance.md.
 set(SC55D_PGO_DIR "${CMAKE_BINARY_DIR}/pgo" CACHE PATH "Where PGO profile data lives")
 if(SC55D_PGO STREQUAL "generate")
     add_compile_options(-fprofile-generate=${SC55D_PGO_DIR})
