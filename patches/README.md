@@ -19,6 +19,25 @@ below for exactly which romsets that covers.
 
 ## Validation status
 
+**The strongest check available is upstream's own.** `test/integration/` in the
+core's own tree carries 36 real MIDI files and, for each, the **expected
+SHA-256 of the rendered audio** — an absolute reference, not a comparison
+against ourselves. 35 of those cases are for `mk2-v1.01`, which is exactly the
+romset here. Running them needs the core's `nuked-sc55-render` target and
+`NUKED_TEST_ROMDIR` pointing at your ROMs; `scripts/validate-patches.sh` does
+not do this, and should be treated as the quick check rather than the real one.
+
+```bash
+cmake -S vendor/nuked-sc55 -B build-render -DCMAKE_BUILD_TYPE=Release
+cmake --build build-render --target nuked-sc55-render
+# then drive test/integration/CMakeLists.txt's (romset, file, sha256) triples
+# through test/integration/test_runner.py
+```
+
+Note their renderer needs RtMidi present to configure, even though it does not
+use it.
+
+
 **Validated: the SC-55mk2 family.** With a real `mk2-v1.01` ROM set, the
 patched and unpatched cores render **bit-identical audio over 30 seconds** of
 the benchmark's sixteen-part stress sequence — digest `6154f44b25c3b441` for
