@@ -1,3 +1,0 @@
-checked 188743680 (romset, rom2_mask, cp, pc) combinations over 9 romsets
-187466960 of them are side-effect-free reads the fast path may take
-PASS
