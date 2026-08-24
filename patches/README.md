@@ -27,18 +27,24 @@ SHA-256 of the rendered audio** — an absolute reference published by upstream,
 not a comparison against ourselves. 36 of them are for the SC-55mk2 family (35
 `mk2-v1.01` plus one `mk2`), which is exactly the romset available here.
 
-With all thirteen patches applied and a real `mk2-v1.01` ROM set:
+With a real `mk2-v1.01` ROM set, both with and without `patches/`:
 
 ```
-36 mk2 cases from upstream's own test list
+                       36 mk2 cases from upstream's own test list
 
-PASS 36   FAIL 0
+with patches/          PASS 36   FAIL 0
+unpatched (control)    PASS 36   FAIL 0
 ```
 
 Thirty-six independent SHA-256 matches against hashes we did not choose. This
 is what makes the patch series trustworthy in a way that self-comparison never
 could: a digest that agrees with itself proves only that two builds of ours
 agree, whereas these agree with the reference.
+
+The unpatched control is strictly speaking redundant — thirty-six matches
+against an absolute reference cannot happen by accident, so the patched run
+already rules out a broken harness — but it costs nothing but time and it
+closes the question completely.
 
 Reproducing it needs the core's `nuked-sc55-render` target and your own ROMs:
 
