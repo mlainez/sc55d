@@ -89,11 +89,12 @@ endif()
 # a pristine checkout of upstream, and every change we make is reviewable as a
 # patch in this repository. This is also how Buildroot will want it.
 #==============================================================================
-# Off by default: the patches are performance-only and reasoned to be
-# behaviour-preserving, but see patches/README.md -- they have not been checked
-# against real ROM audio, and the core has a history of a timer optimisation
-# that silently changed output. Turn this on after running the digest check.
-option(SC55D_PATCH_CORE "Apply patches/ to a private copy of the core" OFF)
+# On by default. The patches are performance-only and validated bit-identical
+# against 30 s of real SC-55mk2 audio (see patches/README.md). Romsets other
+# than the mk2 family have not been checked -- if you run one, especially the
+# JV-880, run scripts/validate-patches.sh first or configure with
+# -DSC55D_PATCH_CORE=OFF.
+option(SC55D_PATCH_CORE "Apply patches/ to a private copy of the core" ON)
 
 set(CORE_SRC_DIR "${NUKED_DIR}")
 

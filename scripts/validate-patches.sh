@@ -41,7 +41,9 @@ echo "== Building unpatched and patched"
 for spec in "$OFF_DIR:OFF" "$ON_DIR:ON"; do
     dir=${spec%%:*}
     val=${spec##*:}
-    if ! (cmake -S . -B "$dir" -DCMAKE_BUILD_TYPE=Release -DSC55D_PATCH_CORE=$val > "$dir.log" 2>&1 &&
+    nuked_arg=""
+    [ -n "${NUKED_DIR:-}" ] && nuked_arg="-DNUKED_DIR=$NUKED_DIR"
+    if ! (cmake -S . -B "$dir" -DCMAKE_BUILD_TYPE=Release -DSC55D_PATCH_CORE=$val $nuked_arg > "$dir.log" 2>&1 &&
           cmake --build "$dir" -j"$(nproc)" >> "$dir.log" 2>&1); then
         echo "  build failed for SC55D_PATCH_CORE=$val; see $dir.log" >&2
         exit 1

@@ -174,6 +174,24 @@ flags, so re-benchmark after changing them.
 
 ## Performance
 
+**Measured with a real SC-55mk2 ROM set** (`mk2-v1.01`), rendering the
+benchmark's dense sixteen-part sequence for 30 seconds on an Intel Xeon at
+2.8 GHz:
+
+| | realtime ratio |
+|---|---|
+| unpatched core | 2.70x |
+| **with `patches/`** (default) | **3.87x**, worst second 3.44x |
+
+That is **+43.5%**, and it corroborates the −45.1% drop in retired instructions
+measured separately. The patches are validated bit-identical on this romset —
+see [`patches/README.md`](patches/README.md).
+
+Where the time goes with real firmware, unpatched: `PCM_Update` 31.4%,
+`TIMER_Clock` 26.0%, `SM_Update` 11.9%, `unscramble` 4.2% (startup),
+`PCM_ReadROM` 3.7%, `calc_tv` 3.5%.
+
+
 The core is an interpreter running a cycle-level model of two CPUs and a PCM
 chip. It is one serial dependency chain, so it lives or dies on single-core
 throughput and memory latency. In rough order of how much they buy you:
@@ -270,12 +288,15 @@ isolcpus=3 nohz_full=3 rcu_nocbs=3 irqaffinity=0-2
 
 ### Core patches
 
-`patches/` holds performance patches applied at build time to a copy of the
-core; the submodule itself is never modified. They are **off by default** —
-`-DSC55D_PATCH_CORE=ON` enables them — because they change emulator behaviour in
-principle and have not been checked against real ROM audio yet.
-`patches/README.md` has the two-minute digest procedure for validating them on
-your ROMs, and lists what was measured and rejected.
+`patches/` holds twelve performance patches applied at build time to a copy of
+the core; the submodule itself is never modified. They are **on by default**,
+validated bit-identical against 30 seconds of real SC-55mk2 audio, and each has
+a ROM-free equivalence test. `-DSC55D_PATCH_CORE=OFF` disables them.
+
+Romsets other than the mk2 family are **not** validated — no ROMs for them were
+available. If you run one, especially the JV-880, run
+`scripts/validate-patches.sh` first. `patches/README.md` has the details, plus
+what was measured and rejected.
 
 `--bench` prints an FNV-1a digest of the audio it renders precisely so this
 check is easy. A digest marked `(SILENT)` means the run produced no audio and

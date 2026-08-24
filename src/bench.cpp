@@ -169,7 +169,10 @@ int Run(double seconds, double warmup_seconds)
            seconds, rate, warmup_seconds);
     fflush(stdout);
 
-    /* Let the firmware boot and settle before the clock starts. */
+    /* Let the firmware boot and settle before the clock starts. A real SC-55
+     * takes a second or two to come up, and MIDI sent before it is ready is
+     * simply dropped -- which shows up as a silent run rather than an error,
+     * so the default here is deliberately generous. */
     Core::PostReset(Core::Reset::GS);
     Render((uint64_t)(warmup_seconds * rate), nullptr, nullptr);
 

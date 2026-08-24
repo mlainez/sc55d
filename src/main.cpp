@@ -34,6 +34,7 @@ struct Options {
     long core_log_limit = 100;
     bool bench = false;
     double bench_seconds = 30.0;
+    double bench_warmup = 4.0;
     Core::Reset reset = Core::Reset::None;
 };
 
@@ -74,6 +75,9 @@ void PrintUsage()
         "  --bench                 Render a stress sequence as fast as possible\n"
         "                          and report the realtime ratio\n"
         "  --bench-seconds <n>     Seconds of audio to render (default: 30)\n"
+        "  --bench-warmup <n>      Seconds rendered before timing starts, to let\n"
+        "                          the firmware boot (default: 4). Too short and\n"
+        "                          the run measures silence.\n"
         "  -h, --help              This message\n");
 }
 
@@ -217,6 +221,16 @@ bool ParseOptions(int argc, char *argv[], Options *options, bool *done)
                 return false;
             }
         }
+        else if (arg == "--bench-warmup")
+        {
+            if (!take(&value))
+                return false;
+            if (!ParseDouble(value, &options->bench_warmup) || options->bench_warmup < 0.0)
+            {
+                fprintf(stderr, "sc55d: --bench-warmup: \"%s\" is not a non-negative number\n", value);
+                return false;
+            }
+        }
         else
         {
             fprintf(stderr, "sc55d: unknown option %s\n", arg.c_str());
@@ -324,7 +338,7 @@ int main(int argc, char *argv[])
     {
         if (options.realtime)
             Rt::RequestFifoPriority(options.priority);
-        status = Bench::Run(options.bench_seconds, 1.0);
+        status = Bench::Run(options.bench_seconds, options.bench_warmup);
     }
     else
     {

@@ -14,16 +14,27 @@ reviewable as a patch here.
 cmake -S . -B build -DSC55D_PATCH_CORE=ON
 ```
 
-They are **off by default**, and should stay off until validated on your ROMs.
+They are **on by default**, having been validated against real audio — see
+below for exactly which romsets that covers.
 
-## Why off by default
+## Validation status
 
-Each patch is argued to be behaviour-preserving, but an argument is not a test.
-The core carries a cautionary example: commit `8d6f67a`, *"mcu_timer: fix
-invalid optimization"*, undoes an earlier lookup-table change in the very same
-function that silently altered JV-880 output and went unnoticed until someone
-tried to write integration tests for it. A timer that is subtly wrong does not
-crash; it shifts interrupt timing, and you find out much later.
+**Validated: the SC-55mk2 family.** With a real `mk2-v1.01` ROM set, the
+patched and unpatched cores render **bit-identical audio over 30 seconds** of
+the benchmark's sixteen-part stress sequence — digest `6154f44b25c3b441` for
+`mk2` and `8e12918eec7012a4` for `sc155mk2`. The aarch64 build, cross-compiled
+for `-mcpu=cortex-a53` and run under qemu, produces a digest identical to
+x86-64 on the same workload.
+
+**Not validated: `st`, `mk1`, `cm300`, `jv880`, `scb55`, `rlp3237`, `sc155`.**
+No ROMs for them were available. Treat the JV-880 as the one to actually worry
+about: the core carries commit `8d6f67a`, *"mcu_timer: fix invalid
+optimization"*, which undoes an earlier lookup-table change in the very same
+timer function that silently altered **JV-880 output specifically** and went
+unnoticed until someone tried to write integration tests for it. A timer that
+is subtly wrong does not crash; it shifts interrupt timing, and you find out
+much later. If you run one of these romsets, run the validation below first, or
+build with `-DSC55D_PATCH_CORE=OFF`.
 
 ## Validating a patch
 
