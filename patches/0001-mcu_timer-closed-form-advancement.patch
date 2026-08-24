@@ -1,0 +1,734 @@
+mcu_timer: advance the timers in closed form
+
+TIMER_Clock() is the largest single cost in the emulator, ahead of
+PCM_Update. MCU_Step() calls it after every emulated instruction, so it only
+ever advances six timer cycles per call -- there is no long jump to be had
+inside one call. The waste is that it walks those cycles applying ticks that
+change nothing observable. Instrumenting a run gives the ratio: 55M ticks
+produced 1561 events.
+
+So defer instead of jumping. Nothing outside mcu_timer.cpp can see a counter:
+mcu_timer_t is private to the file and its only outputs are the tcsr flags,
+mcu.interrupt_pending, and TIMER_Read()/TIMER_Read2(). Two new fields track
+how far the counters have actually been advanced and the first cycle at which
+deferring must stop; every entry point that can observe timer state syncs
+first, and the two register-write paths also invalidate the schedule.
+
+Scheduling is the closed form: per timer, the distance to the next observable
+thing is the minimum of reaching ocra, reaching ocrb and wrapping, skipping
+any whose flag is already latched and accounting for counter-clear-on-match
+making some values unreachable. Earliest across all four wins.
+
+Interrupt idempotency was checked rather than assumed. MCU_Interrupt_SetRequest
+is a bit set, and MCU_Interrupt_Handle does not clear it on dispatch -- the
+lines that would are commented out upstream. Only the register writes clear it,
+and those sync first. So a span of ticks collapses to one pass over the final
+flags. Idempotent is not the same as invisible, though: a flag latched while
+its interrupt is masked must raise the request on the next tick once the enable
+is turned on, with no flag change. That is an event too, and missing it is a
+bug the test catches.
+
+This supersedes the earlier edge-skipping patch, which only removed the empty
+iterations and left the per-edge work. Retired instructions for TIMER_Clock,
+on the placeholder-ROM benchmark: 2295M upstream, 2142M with edge-skipping,
+38M with this. Whole program 7865M -> 5608M.
+
+Those figures flatter it, because zero-filled ROMs leave the timers quiescent.
+patches/tests/timer_closed_form/ includes a microbenchmark that programs the
+timers the way firmware would, with an ISR stand-in acknowledging interrupts.
+Retired instructions per call there, worst case first: 691 -> 559 -> 184 on the
+finest dividers with everything active, and 512 -> 325 -> 25 at realistic
+densities. So 3x better than edge-skipping at worst, 10-13x typically.
+
+A variant that recomputes the schedule every call and needs no header change
+measured no better than edge-skipping, so the two fields in mcu_timer.h earn
+their place. std::popcount for the divider shift turned into a libcall to
+__popcountdi2 on both x86-64 and A53; std::countr_zero(mask + 1) is the same
+value without one.
+
+Equivalence: the differential test drives both implementations through 9.6M
+operations across 480 randomised runs with zero mismatches, and nine
+deliberate mutations are all caught. Independently, on the placeholder-ROM
+profile every other function in the emulator -- PCM_Update, SM_Update,
+MCU_Interrupt_Handle, calc_tv, PCM_ReadROM, MCU_Read, SM_Read -- retires a
+bit-identical instruction count, so the emulated MCU executed exactly the same
+instruction stream. Real-ROM audio remains unchecked; see patches/README.md.
+
+Found by a subagent; reviewed, re-measured and integrated here.
+
+
+Supersedes 0001-mcu_timer-skip-uneventful-cycles.patch. Apply this one instead,
+not on top of it -- it rewrites the same function starting from upstream.
+
+0001 removed the cycles on which no divider edge falls. What is left is real
+work: TIMER_Clock() is called once per emulated instruction and asked to
+advance six cycles, so with the /4 divider the three FRTs genuinely tick once
+or twice per call, and with the /2 divider three times. Each tick compares the
+counter against two compare registers, increments it, tests for overflow and
+re-tests three interrupt enables. On a 32-slot workload that was still 27.8% of
+retired instructions after 0001, and the profile said 335 instructions per
+call.
+
+But almost none of that work produces anything. Between events an FRT counter
+only counts, and nothing outside mcu_timer.cpp can see a counter: the struct is
+private to this file, and the only ways out of it are the tcsr flags, the
+interrupt bitset, and TIMER_Read()/TIMER_Read2(). An instrumented run bears
+this out -- 55 million ticks produced 1561 events.
+
+So the timers are advanced lazily. `timer.cycles` still lands exactly where the
+original loop left it on every call, but the counters are only brought forward
+when a tick could produce something observable. `timer.synced` records how far
+they have really been advanced; `timer.next_event` is the first `cycles` value
+at which deferring is no longer allowed. Both live in mcu_timer_t, so this
+patch touches mcu_timer.h as well -- there is nowhere else to put per-instance
+state.
+
+Computing next_event is the closed form. For each timer, work out the number of
+ticks until its counter next reads ocra, reads ocrb, or wraps 0xffff -> 0,
+allowing for the counter-clear-on-compare-match that makes some values
+unreachable; convert ticks to cycles through the divider; take the earliest
+across all four timers. Then TIMER_Clock() is four instructions until that
+cycle arrives, and every entry point that can observe timer state syncs first.
+
+Three things this depends on, all checked rather than assumed:
+
+  - Interrupt requests are idempotent. MCU_Interrupt_SetRequest(..., 1) is a
+    bit set on mcu.interrupt_pending, dispatch in MCU_Interrupt_Handle() does
+    not clear the bit (the lines that would are commented out upstream), and
+    the only code that clears a timer request is TIMER_Write()/TIMER2_Write(),
+    which sync first and clear the matching flag as they do it. That is what
+    lets a whole span of ticks collapse into one pass over the final flags.
+
+  - Idempotent is not the same as invisible. If a flag is set while its
+    interrupt is masked and the enable is then turned on, upstream raises the
+    request on the very next tick although no flag changes. That is an event,
+    and TIMER_FrtEventDist()/TIMER_TmrEventDist() return 0 for it.
+
+  - A tmr step mask of 0 means "never step" and is not an edge, in the schedule
+    as well as in the advance -- the trap commit 8d6f67a had to fix.
+
+The loop bound is still clamped exactly as 0001 clamped it: timer.cycles
+persists across calls, so running past the point the original stopped at would
+consume cycles a later, finer divider would have fired on.
+
+std::countr_zero(mask + 1), not std::popcount(mask): both give k for a 2^k - 1
+mask, but gcc emits a call to __popcountdi2 unless the target has the
+instruction, and neither a Cortex-A53 nor baseline x86-64 does.
+
+Measured on x86-64 against the 32-slot placeholder-ROM benchmark, retired
+instructions: whole program 7711M -> 5608M, TIMER_Clock 2142M -> 38M, wall
+clock 3.06s -> 1.93s. That workload is flattering -- zero-filled ROMs leave the
+timers quiescent after warm-up, 85 syncs in 6.4M calls -- so patches/tests/
+also carries a harness that programs the timers the way firmware would and
+services the interrupts. There, per call:
+
+              upstream   0001   closed form
+  /4 dividers, one periodic FRT, period 512     472    295    14
+  /4, three FRTs + 8-bit timer, period 512      512    325    32
+  /2, three FRTs + 8-bit timer, period 512      684    552    79
+  /2, three FRTs + 8-bit timer, period 64       691    559   184
+
+Worst case measured is 3.0x better than 0001; realistic cases are 7-20x.
+
+patches/tests/timer_closed_form_equivalence.cpp builds the real mcu_timer.cpp
+twice -- upstream's and this one -- against a stub mcu.h, and compares
+timer.cycles, the whole interrupt bitset and every register read at every
+operation over 9.6M randomised operations. patches/tests/timer_mutants.sh
+breaks this implementation nine different ways and confirms the test catches
+all nine.
+
+Beyond that: in the placeholder-ROM run the per-function instruction counts of
+every other function in the emulator -- all the opcode handlers, PCM, the sub
+MCU, MCU_Interrupt_Handle -- are bit-identical to upstream's, which means the
+emulated MCU executed exactly the same instruction stream. Real-ROM audio is
+still the check that matters; see patches/README.md.
+
+--- a/src/backend/mcu_timer.h
++++ b/src/backend/mcu_timer.h
+@@ -67,6 +67,19 @@
+ struct mcu_timer_t
+ {
+     uint64_t cycles = 0;
++
++    // Cycle up to (but not including) which every timer tick has actually been
++    // applied. TIMER_Clock() leaves `cycles` exactly where the original
++    // one-cycle-at-a-time loop left it, but defers the work itself until a tick
++    // can produce something observable, so `synced` lags behind `cycles`
++    // between events. Everything that can observe timer state syncs first.
++    uint64_t synced = 0;
++
++    // Smallest `cycles` value at which TIMER_Clock() must stop deferring. This
++    // is (cycle of the next observable tick) + 1, or UINT64_MAX when no timer
++    // can produce anything observable until a register is written.
++    uint64_t next_event = 0;
++
+     FRT_Step_Table frt_step_table;
+     TMR_Step_Table tmr_step_table;
+ 
+--- a/src/backend/mcu_timer.cpp
++++ b/src/backend/mcu_timer.cpp
+@@ -33,6 +33,7 @@
+  */
+ #include "mcu_timer.h"
+ #include "mcu.h"
++#include <bit>
+ #include <cstdint>
+ 
+ enum TMR_TCR_Bits : uint8_t
+@@ -98,6 +99,12 @@
+     REG_ICRL  = 0x09,
+ };
+ 
++// Bring every timer up to date with cycle `limit` (exclusive) and work out
++// when the next observable tick is. Defined further down, next to the rest of
++// the clocking code; declared here because every entry point that can observe
++// timer state has to call it first.
++static void TIMER_Sync(mcu_timer_t& timer, uint64_t limit);
++
+ void TIMER_Init(mcu_timer_t& timer, mcu_t& mcu)
+ {
+     timer.mcu = &mcu;
+@@ -105,6 +112,11 @@
+ 
+ void TIMER_Reset(mcu_timer_t& timer)
+ {
++    // Anything the deferred ticks would have done still has to happen: they are
++    // in the past, and the original had already applied them by now.
++    if (timer.synced < timer.cycles)
++        TIMER_Sync(timer, timer.cycles);
++
+     for (int i = 0; i < 3; ++i)
+     {
+         timer.frt[i] = {
+@@ -125,6 +137,9 @@
+         .tcnt      = 0,
+         .status_rd = 0,
+     };
++    // timer.cycles deliberately survives a reset, as it always has.
++    timer.synced     = timer.cycles;
++    timer.next_event = 0;
+ }
+ 
+ void TIMER_Write(mcu_timer_t& timer, uint32_t address, uint8_t data)
+@@ -132,6 +147,9 @@
+     uint32_t t = (address >> 4) - 1;
+     if (t > 2)
+         return;
++    // The MCU is about to observe and change timer state, so every tick that
++    // has already happened must be applied before it does.
++    TIMER_Sync(timer, timer.cycles);
+     frt_t& frt = timer.frt[t];
+ 
+     address &= 0x0f;
+@@ -181,6 +199,9 @@
+         frt.icr = (uint16_t)((timer.tempreg << 8) | data);
+         break;
+     }
++    // Registers changed under us; the schedule computed at the top of this
++    // function is stale. 0 forces the next TIMER_Clock() to recompute it.
++    timer.next_event = 0;
+ }
+ 
+ uint8_t TIMER_Read(mcu_timer_t& timer, uint32_t address)
+@@ -188,6 +209,7 @@
+     uint32_t t = (address >> 4) - 1;
+     if (t > 2)
+         return 0xff;
++    TIMER_Sync(timer, timer.cycles);
+     frt_t& frt = timer.frt[t];
+ 
+     address &= 0x0f;
+@@ -224,6 +246,7 @@
+ 
+ void TIMER2_Write(mcu_timer_t& timer, uint32_t address, uint8_t data)
+ {
++    TIMER_Sync(timer, timer.cycles);
+     tmr_t& tmr = timer.tmr;
+ 
+     switch (address)
+@@ -263,10 +286,12 @@
+         tmr.tcnt = data;
+         break;
+     }
++    timer.next_event = 0;
+ }
+ 
+ uint8_t TIMER_Read2(mcu_timer_t& timer, uint32_t address)
+ {
++    TIMER_Sync(timer, timer.cycles);
+     tmr_t& tmr = timer.tmr;
+ 
+     switch (address)
+@@ -289,106 +314,402 @@
+ }
+ 
+ 
+-inline void TIMER_ClockFrt(mcu_timer_t& timer, int frt_id)
++// ---------------------------------------------------------------------------
++// Closed-form advancement
++//
++// TIMER_Clock() is called once per emulated instruction and is only ever asked
++// to advance six cycles, so with the usual /4 divider the three FRTs really do
++// tick one or two times per call. Stepping them is not wasted work in the way
++// the empty cycles were -- it is just work that produces nothing the MCU can
++// see. Between events an FRT counter only counts, and nothing outside this file
++// can look at it.
++//
++// So the timers are advanced lazily. `timer.cycles` still lands exactly where
++// the original loop left it on every call, but the counters are only brought
++// forward when a tick could produce something observable. `timer.synced` is how
++// far they have actually been advanced, and `timer.next_event` is the first
++// `cycles` value at which deferring is no longer allowed.
++//
++// What counts as observable, given that this function's only outputs are the
++// timer registers and mcu.interrupt_pending:
++//
++//   * A tcsr flag going 0 -> 1. Flags are sticky; only TIMER_Write() and
++//     TIMER2_Write() clear them, and those sync first.
++//   * MCU_Interrupt_SetRequest(..., 1) on a source that is not already
++//     requested. The call is an idempotent bit set (mcu_interrupt.cpp), and the
++//     only code that clears a timer request is TIMER_Write()/TIMER2_Write(),
++//     which sync first and clear the matching flag as they do it. So a request
++//     that is already pending cannot be observed being set again -- but one that
++//     has been cleared while its flag stayed set will be raised again on the
++//     very next tick, and that is an event.
++//   * A counter value, but only via TIMER_Read()/TIMER_Read2(), which sync.
++//
++// Nothing else reaches timer state: mcu_timer_t is touched by this file alone.
++// ---------------------------------------------------------------------------
++
++// Returned by the distance helpers when a value is never reached again.
++static constexpr uint32_t TIMER_NEVER = 0xffffffffu;
++
++// How many times a timer with this divider mask is clocked over [begin, end).
++// Every step-table entry is 2^k - 1, so the clocked cycles are exactly the
++// multiples of 2^k.
++static inline uint64_t TIMER_TickCount(uint64_t begin, uint64_t end, uint64_t mask)
++{
++    // countr_zero(mask + 1), not popcount(mask): both give k for a 2^k - 1
++    // mask, but gcc turns popcount into a call to __popcountdi2 unless the
++    // target has the instruction, and neither a Cortex-A53 nor a baseline
++    // x86-64 does. Counting trailing zeros is bsf / rbit+clz everywhere.
++    const int shift = std::countr_zero(mask + 1);
++    return ((end + mask) >> shift) - ((begin + mask) >> shift);
++}
++
++// First cycle at or after `from` on which such a timer is clocked.
++static inline uint64_t TIMER_FirstTick(uint64_t from, uint64_t mask)
++{
++    return (from + mask) & ~mask;
++}
++
++// Ticks until an up-counter reading `cur` next reads `target`, where the counter
++// runs 0..maxv and, if has_clear, is reset to 0 by a compare-match against
++// `clear` instead of incrementing past it.
++static uint32_t TIMER_DistToValue(uint32_t cur, uint32_t target, uint32_t maxv, bool has_clear, uint32_t clear)
++{
++    if (!has_clear)
++        return (target - cur) & maxv;
++
++    if (cur <= clear)
++    {
++        // Cycles within [0, clear] forever; nothing above clear is reachable.
++        if (target > clear)
++            return TIMER_NEVER;
++        return target >= cur ? target - cur : target + clear + 1 - cur;
++    }
++
++    // Started above the clear point: counts up to maxv, wraps to 0, and only
++    // then starts cycling within [0, clear].
++    if (target >= cur)
++        return target - cur;
++    if (target <= clear)
++        return maxv + 1 - cur + target;
++    return TIMER_NEVER;
++}
++
++// Ticks until such a counter next wraps maxv -> 0, which is what sets OVF.
++static uint32_t TIMER_DistToOverflow(uint32_t cur, uint32_t maxv, bool has_clear, uint32_t clear)
++{
++    // A counter cycling within [0, clear] never reaches the wrap; if clear is
++    // maxv itself the compare-match clears it instead of overflowing.
++    if (has_clear && cur <= clear)
++        return TIMER_NEVER;
++    return maxv - cur;
++}
++
++// Advance one FRT by `ticks` clocks, exactly as `ticks` iterations of the
++// original per-cycle body would have.
++static void TIMER_AdvanceFrt(mcu_timer_t& timer, int frt_id, uint64_t ticks)
+ {
+     frt_t& frt = timer.frt[frt_id];
+ 
+-    if (timer.cycles & timer.frt_step_table[frt.tcr & (FRT_TCR_CKS0 | FRT_TCR_CKS1)])
+-    {
++    if (ticks == 0)
+         return;
+-    }
+ 
+-    const bool matcha = frt.frc == frt.ocra;
+-    const bool matchb = frt.frc == frt.ocrb;
+-    if ((frt.tcsr & FRT_TCSR_CCLRA) && matcha) // CCLRA
+-    {
+-        frt.frc = 0;
+-    }
+-    else
+-    {
+-        ++frt.frc;
+-        if (frt.frc == 0)
++    const uint32_t ocra  = frt.ocra;
++    const uint32_t ocrb  = frt.ocrb;
++    const bool     cclra = (frt.tcsr & FRT_TCSR_CCLRA) != 0;
++
++    uint32_t frc  = frt.frc;
++    uint8_t  tcsr = frt.tcsr;
++
++    while (ticks != 0)
++    {
++        // On a tick where frc is none of ocra, ocrb or 0xffff the body does
++        // nothing but increment, so run all of those in one addition. Bounding
++        // the run by 0xffff - frc is also what makes the addition safe.
++        uint32_t       run = 0xffffu - frc;
++        const uint32_t da  = (ocra - frc) & 0xffffu;
++        const uint32_t db  = (ocrb - frc) & 0xffffu;
++        if (da < run)
++            run = da;
++        if (db < run)
++            run = db;
++
++        if (run >= ticks)
+         {
+-            frt.tcsr |= FRT_TCSR_OVF;
++            frc += (uint32_t)ticks;
++            break;
+         }
+-    }
+ 
+-    // flags
+-    if (matcha)
+-        frt.tcsr |= FRT_TCSR_OCFA;
+-    if (matchb)
+-        frt.tcsr |= FRT_TCSR_OCFB;
++        frc   += run;
++        ticks -= run;
+ 
+-    if ((frt.tcr & FRT_TCR_OVIE) != 0 && (frt.tcsr & FRT_TCSR_OVF) != 0)
++        // One tick of the original body, minus the interrupt requests.
++        const bool matcha = frc == ocra;
++        const bool matchb = frc == ocrb;
++        if (cclra && matcha)
++        {
++            frc = 0;
++        }
++        else
++        {
++            frc = (frc + 1) & 0xffffu;
++            if (frc == 0)
++                tcsr |= FRT_TCSR_OVF;
++        }
++        if (matcha)
++            tcsr |= FRT_TCSR_OCFA;
++        if (matchb)
++            tcsr |= FRT_TCSR_OCFB;
++
++        --ticks;
++    }
++
++    frt.frc  = (uint16_t)frc;
++    frt.tcsr = tcsr;
++
++    // The original raises requests on every tick, for whichever flags are set at
++    // the time. Requests are idempotent bit sets, tcr cannot change and no flag
++    // can be cleared inside this span, so the union of all those calls is this
++    // single pass over the final flags. At least one tick happened.
++    if ((frt.tcr & FRT_TCR_OVIE) != 0 && (tcsr & FRT_TCSR_OVF) != 0)
+         MCU_Interrupt_SetRequest(*timer.mcu, (MCU_Interrupt_Source)(INTERRUPT_SOURCE_FRT0_FOVI + frt_id * 4), 1);
+-    if ((frt.tcr & FRT_TCR_OCIEA) != 0 && (frt.tcsr & FRT_TCSR_OCFA) != 0)
++    if ((frt.tcr & FRT_TCR_OCIEA) != 0 && (tcsr & FRT_TCSR_OCFA) != 0)
+         MCU_Interrupt_SetRequest(*timer.mcu, (MCU_Interrupt_Source)(INTERRUPT_SOURCE_FRT0_OCIA + frt_id * 4), 1);
+-    if ((frt.tcr & FRT_TCR_OCIEB) != 0 && (frt.tcsr & FRT_TCSR_OCFB) != 0)
++    if ((frt.tcr & FRT_TCR_OCIEB) != 0 && (tcsr & FRT_TCSR_OCFB) != 0)
+         MCU_Interrupt_SetRequest(*timer.mcu, (MCU_Interrupt_Source)(INTERRUPT_SOURCE_FRT0_OCIB + frt_id * 4), 1);
+ }
+ 
+-inline void TIMER_ClockTmr(mcu_timer_t& timer)
++// Advance the 8-bit timer by `ticks` clocks. Same shape as the FRT above.
++static void TIMER_AdvanceTmr(mcu_timer_t& timer, uint64_t ticks)
+ {
+     tmr_t& tmr = timer.tmr;
+ 
+-    const uint16_t step_mask = timer.tmr_step_table[tmr.tcr & (TMR_TCR_CKS0 | TMR_TCR_CKS1 | TMR_TCR_CKS2)];
++    if (ticks == 0)
++        return;
++
++    const uint32_t tcora = tmr.tcora;
++    const uint32_t tcorb = tmr.tcorb;
++    const uint8_t  cclr  = tmr.tcr & (TMR_TCR_CCLR0 | TMR_TCR_CCLR1);
++
++    uint32_t tcnt = tmr.tcnt;
++    uint8_t  tcsr = tmr.tcsr;
++
++    while (ticks != 0)
++    {
++        uint32_t       run = 0xffu - tcnt;
++        const uint32_t da  = (tcora - tcnt) & 0xffu;
++        const uint32_t db  = (tcorb - tcnt) & 0xffu;
++        if (da < run)
++            run = da;
++        if (db < run)
++            run = db;
++
++        if (run >= ticks)
++        {
++            tcnt += (uint32_t)ticks;
++            break;
++        }
++
++        tcnt  += run;
++        ticks -= run;
++
++        const bool matcha = tcnt == tcora;
++        const bool matchb = tcnt == tcorb;
++        if (cclr == TMR_TCR_CCLR0 && matcha)
++        {
++            tcnt = 0;
++        }
++        else if (cclr == TMR_TCR_CCLR1 && matchb)
++        {
++            tcnt = 0;
++        }
++        else
++        {
++            tcnt = (tcnt + 1) & 0xffu;
++            if (tcnt == 0)
++                tcsr |= TMR_TCSR_OVF;
++        }
++        if (matcha)
++            tcsr |= TMR_TCSR_CMFA;
++        if (matchb)
++            tcsr |= TMR_TCSR_CMFB;
++
++        --ticks;
++    }
++
++    tmr.tcnt = (uint8_t)tcnt;
++    tmr.tcsr = tcsr;
+ 
+-    if (step_mask == 0)
++    if ((tmr.tcr & TMR_TCR_OVIE) != 0 && (tcsr & TMR_TCSR_OVF) != 0)
++        MCU_Interrupt_SetRequest(*timer.mcu, INTERRUPT_SOURCE_TIMER_OVI, 1);
++    if ((tmr.tcr & TMR_TCR_CMIEA) != 0 && (tcsr & TMR_TCSR_CMFA) != 0)
++        MCU_Interrupt_SetRequest(*timer.mcu, INTERRUPT_SOURCE_TIMER_CMIA, 1);
++    if ((tmr.tcr & TMR_TCR_CMIEB) != 0 && (tcsr & TMR_TCSR_CMFB) != 0)
++        MCU_Interrupt_SetRequest(*timer.mcu, INTERRUPT_SOURCE_TIMER_CMIB, 1);
++}
++
++// Ticks until this FRT does something observable, or TIMER_NEVER.
++static uint32_t TIMER_FrtEventDist(const mcu_timer_t& timer, int frt_id)
++{
++    const frt_t& frt = timer.frt[frt_id];
++
++    const uint8_t  tcr       = frt.tcr;
++    const uint8_t  tcsr      = frt.tcsr;
++    const bool     has_clear = (tcsr & FRT_TCSR_CCLRA) != 0;
++    const uint32_t clear     = frt.ocra;
++    const uint32_t cur       = frt.frc;
++
++    // A set flag whose interrupt is enabled but no longer pending -- the MCU
++    // acknowledged the request without clearing the flag -- is re-raised on the
++    // next tick, so there is nothing to defer.
++    const auto raises_again = [&](uint8_t enable, uint8_t flag, int source) {
++        return (tcr & enable) != 0 && (tcsr & flag) != 0 &&
++               !timer.mcu->interrupt_pending.Contains((MCU_Interrupt_Source)source);
++    };
++    if (raises_again(FRT_TCR_OVIE, FRT_TCSR_OVF, INTERRUPT_SOURCE_FRT0_FOVI + frt_id * 4) ||
++        raises_again(FRT_TCR_OCIEA, FRT_TCSR_OCFA, INTERRUPT_SOURCE_FRT0_OCIA + frt_id * 4) ||
++        raises_again(FRT_TCR_OCIEB, FRT_TCSR_OCFB, INTERRUPT_SOURCE_FRT0_OCIB + frt_id * 4))
+     {
+-        return;
++        return 0;
+     }
+ 
+-    if (timer.cycles & step_mask)
++    uint32_t dist = TIMER_NEVER;
++    if ((tcsr & FRT_TCSR_OCFA) == 0)
+     {
+-        return;
++        const uint32_t d = TIMER_DistToValue(cur, frt.ocra, 0xffff, has_clear, clear);
++        if (d < dist)
++            dist = d;
+     }
++    if ((tcsr & FRT_TCSR_OCFB) == 0)
++    {
++        const uint32_t d = TIMER_DistToValue(cur, frt.ocrb, 0xffff, has_clear, clear);
++        if (d < dist)
++            dist = d;
++    }
++    if ((tcsr & FRT_TCSR_OVF) == 0)
++    {
++        const uint32_t d = TIMER_DistToOverflow(cur, 0xffff, has_clear, clear);
++        if (d < dist)
++            dist = d;
++    }
++    return dist;
++}
+ 
+-    const bool matcha = tmr.tcnt == tmr.tcora;
+-    const bool matchb = tmr.tcnt == tmr.tcorb;
+-    if ((tmr.tcr & (TMR_TCR_CCLR0 | TMR_TCR_CCLR1)) == TMR_TCR_CCLR0 && matcha)
++// Ticks until the 8-bit timer does something observable, or TIMER_NEVER.
++static uint32_t TIMER_TmrEventDist(const mcu_timer_t& timer)
++{
++    const tmr_t& tmr = timer.tmr;
++
++    const uint8_t tcr  = tmr.tcr;
++    const uint8_t tcsr = tmr.tcsr;
++    const uint8_t cclr = tcr & (TMR_TCR_CCLR0 | TMR_TCR_CCLR1);
++
++    // Only one of the two compare-matches clears the counter, and setting both
++    // bits (or neither) leaves it free-running.
++    const bool     has_clear = cclr == TMR_TCR_CCLR0 || cclr == TMR_TCR_CCLR1;
++    const uint32_t clear     = cclr == TMR_TCR_CCLR0 ? tmr.tcora : tmr.tcorb;
++    const uint32_t cur       = tmr.tcnt;
++
++    const auto raises_again = [&](uint8_t enable, uint8_t flag, MCU_Interrupt_Source source) {
++        return (tcr & enable) != 0 && (tcsr & flag) != 0 && !timer.mcu->interrupt_pending.Contains(source);
++    };
++    if (raises_again(TMR_TCR_OVIE, TMR_TCSR_OVF, INTERRUPT_SOURCE_TIMER_OVI) ||
++        raises_again(TMR_TCR_CMIEA, TMR_TCSR_CMFA, INTERRUPT_SOURCE_TIMER_CMIA) ||
++        raises_again(TMR_TCR_CMIEB, TMR_TCSR_CMFB, INTERRUPT_SOURCE_TIMER_CMIB))
+     {
+-        tmr.tcnt = 0;
++        return 0;
+     }
+-    else if ((tmr.tcr & (TMR_TCR_CCLR0 | TMR_TCR_CCLR1)) == TMR_TCR_CCLR1 && matchb)
++
++    uint32_t dist = TIMER_NEVER;
++    if ((tcsr & TMR_TCSR_CMFA) == 0)
+     {
+-        tmr.tcnt = 0;
++        const uint32_t d = TIMER_DistToValue(cur, tmr.tcora, 0xff, has_clear, clear);
++        if (d < dist)
++            dist = d;
+     }
+-    else
++    if ((tcsr & TMR_TCSR_CMFB) == 0)
+     {
+-        ++tmr.tcnt;
+-        if (tmr.tcnt == 0)
++        const uint32_t d = TIMER_DistToValue(cur, tmr.tcorb, 0xff, has_clear, clear);
++        if (d < dist)
++            dist = d;
++    }
++    if ((tcsr & TMR_TCSR_OVF) == 0)
++    {
++        const uint32_t d = TIMER_DistToOverflow(cur, 0xff, has_clear, clear);
++        if (d < dist)
++            dist = d;
++    }
++    return dist;
++}
++
++// Work out the earliest cycle on which any timer does something observable, and
++// store the first `cycles` value that must not be deferred past.
++static void TIMER_ScheduleNextEvent(mcu_timer_t& timer)
++{
++    uint64_t next = ~(uint64_t)0;
++
++    for (int i = 0; i < 3; i++)
++    {
++        const uint32_t dist = TIMER_FrtEventDist(timer, i);
++        if (dist == TIMER_NEVER)
++            continue;
++        const uint64_t mask = timer.frt_step_table[timer.frt[i].tcr & (FRT_TCR_CKS0 | FRT_TCR_CKS1)];
++        const uint64_t at   = TIMER_FirstTick(timer.synced, mask) + (uint64_t)dist * (mask + 1);
++        if (at < next)
++            next = at;
++    }
++
++    // A step mask of 0 means this timer never steps at all, so it can never
++    // reach an event; it is not an edge on every cycle.
++    const uint64_t tmr_mask = timer.tmr_step_table[timer.tmr.tcr & (TMR_TCR_CKS0 | TMR_TCR_CKS1 | TMR_TCR_CKS2)];
++    if (tmr_mask != 0)
++    {
++        const uint32_t dist = TIMER_TmrEventDist(timer);
++        if (dist != TIMER_NEVER)
+         {
+-            tmr.tcsr |= TMR_TCSR_OVF;
++            const uint64_t at = TIMER_FirstTick(timer.synced, tmr_mask) + (uint64_t)dist * (tmr_mask + 1);
++            if (at < next)
++                next = at;
+         }
+     }
+ 
+-    // flags
+-    if (matcha)
+-        tmr.tcsr |= TMR_TCSR_CMFA;
+-    if (matchb)
+-        tmr.tcsr |= TMR_TCSR_CMFB;
+-
+-    if ((tmr.tcr & TMR_TCR_OVIE) != 0 && (tmr.tcsr & TMR_TCSR_OVF) != 0)
+-        MCU_Interrupt_SetRequest(*timer.mcu, INTERRUPT_SOURCE_TIMER_OVI, 1);
+-    if ((tmr.tcr & TMR_TCR_CMIEA) != 0 && (tmr.tcsr & TMR_TCSR_CMFA) != 0)
+-        MCU_Interrupt_SetRequest(*timer.mcu, INTERRUPT_SOURCE_TIMER_CMIA, 1);
+-    if ((tmr.tcr & TMR_TCR_CMIEB) != 0 && (tmr.tcsr & TMR_TCSR_CMFB) != 0)
+-        MCU_Interrupt_SetRequest(*timer.mcu, INTERRUPT_SOURCE_TIMER_CMIB, 1);
++    // TIMER_Clock() processes the ticks strictly below its limit, so the limit
++    // it must not stop short of is one past the event cycle.
++    timer.next_event = next == ~(uint64_t)0 ? next : next + 1;
+ }
+ 
+-void TIMER_Clock(mcu_timer_t& timer, uint64_t cycles)
++static void TIMER_Sync(mcu_timer_t& timer, uint64_t limit)
+ {
+-    while (timer.cycles * 2 < cycles) // FIXME
++    if (limit > timer.synced)
+     {
+         for (int i = 0; i < 3; i++)
+         {
+-            TIMER_ClockFrt(timer, i);
++            const uint64_t mask = timer.frt_step_table[timer.frt[i].tcr & (FRT_TCR_CKS0 | FRT_TCR_CKS1)];
++            TIMER_AdvanceFrt(timer, i, TIMER_TickCount(timer.synced, limit, mask));
+         }
+ 
+-        TIMER_ClockTmr(timer);
++        const uint64_t tmr_mask =
++            timer.tmr_step_table[timer.tmr.tcr & (TMR_TCR_CKS0 | TMR_TCR_CKS1 | TMR_TCR_CKS2)];
++        if (tmr_mask != 0)
++            TIMER_AdvanceTmr(timer, TIMER_TickCount(timer.synced, limit, tmr_mask));
+ 
+-        ++timer.cycles;
++        timer.synced = limit;
+     }
++
++    TIMER_ScheduleNextEvent(timer);
++}
++
++void TIMER_Clock(mcu_timer_t& timer, uint64_t cycles)
++{
++    // Where the original one-cycle-at-a-time loop would have stopped. Landing
++    // exactly here matters: timer.cycles persists across calls, and running
++    // past it would consume cycles a finer divider could later have fired on.
++    const uint64_t limit = (cycles + 1) / 2; // FIXME: the /2 is upstream's
++
++    if (timer.cycles < limit)
++        timer.cycles = limit;
++
++    if (limit >= timer.next_event)
++        TIMER_Sync(timer, limit);
+ }
+ 
+ // These tables are indexed by the low CKSn bits of the TCR.
+@@ -401,7 +722,12 @@
+ 
+ void TIMER_NotifyRomsetChange(mcu_timer_t& timer)
+ {
++    // Deferred ticks belong to the old dividers; apply them before switching.
++    if (timer.synced < timer.cycles)
++        TIMER_Sync(timer, timer.cycles);
++
+     const bool is_mk1    = timer.mcu->is_mk1;
+     timer.frt_step_table = is_mk1 ? FRT_STEP_TABLE_MK1 : FRT_STEP_TABLE_GENERIC;
+     timer.tmr_step_table = is_mk1 ? TMR_STEP_TABLE_MK1 : TMR_STEP_TABLE_GENERIC;
++    timer.next_event     = 0;
+ }

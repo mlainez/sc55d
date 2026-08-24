@@ -313,7 +313,12 @@ tables: 5.1x faster startup, proved exhaustively over all 256 data bytes and all
 8388608 addresses by `patches/tests/unscramble_equivalence.cpp`. No library
 needed — just noticing that a constant permutation can be precomputed.
 
-## The biggest remaining target
+## The biggest remaining target — now taken
+
+*Superseded: `patches/0001` does this. Kept because the reasoning is what
+found it.*
+
+## How the timer was fixed
 
 After `patches/0001`, `TIMER_Clock` is *still* the largest single function in
 the profile — about 30% of retired instructions. That is not waste any more; it
@@ -342,14 +347,14 @@ Ranked by measured evidence rather than novelty:
 
 1. **Build flags** — `-mcpu`, LTO, PGO. Free, and PGO in particular suits a
    dispatch-table interpreter. See the README.
-2. **`patches/0001`** — `TIMER_Clock` edge skipping, +11%. Proved by
-   differential test; still needs real-ROM validation.
+2. **`patches/0001`** — `TIMER_Clock` closed-form advancement. 2295M → 38M
+   retired instructions; 3x better than edge-skipping in the worst measured
+   case, 10-13x typically. Differential test plus 9/9 mutants; real-ROM audio
+   still unchecked.
 3. **Romset choice** — `scb55` has no sub-MCU, deleting 12% of the workload
    outright with no patch at all.
 4. **`patches/0002`** — startup, done and proved.
-5. **Closed-form timer advancement** — see above, ~25%, the biggest remaining
-   item and the only one that needs real design work.
-6. **Re-profile on the target with real ROMs.** Everything above was measured on
+5. **Re-profile on the target with real ROMs.** Everything above was measured on
    x86-64 with placeholder ROMs, which under-represents the MCU interpreter. The
    ranking could change; `--bench` and callgrind are all it takes.
 

@@ -131,6 +131,17 @@ for t in patches/tests/*.cpp; do
         tail -5 "/tmp/$name.log"
     fi
 done
+
+for t in patches/tests/*/run.sh; do
+    [ -e "$t" ] || continue
+    name=$(basename "$(dirname "$t")")
+    if "$t" > "/tmp/$name.log" 2>&1; then
+        ok "$name"
+    else
+        warn "$name FAILED — do not enable -DSC55D_PATCH_CORE=ON"
+        tail -8 "/tmp/$name.log"
+    fi
+done
 note "These prove the patch transformations, not the emulation."
 note "Use scripts/validate-patches.sh with real ROMs before trusting them."
 

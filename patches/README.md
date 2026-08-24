@@ -48,27 +48,41 @@ too.
 
 | Patch | Effect | Status |
 |---|---|---|
-| `0001-mcu_timer-skip-uneventful-cycles.patch` | `TIMER_Clock()` steps one cycle at a time — six iterations per emulated instruction, most doing nothing. Steps to the next divider edge instead. | +11% end to end; `TIMER_Clock` 2295M → 2142M instructions. **Proved by differential test; real-ROM audio still unchecked.** |
-| `0002-rom_io-table-driven-unscramble.patch` | `unscramble()` rebuilds two fixed bit permutations a bit at a time per byte — ~28 tests over 2–3 MB of wave ROM. Precomputes 8.25 KiB of compile-time tables. | 5.1x faster startup. **Equivalence proved exhaustively.** |
+| `0001-mcu_timer-closed-form-advancement.patch` | `TIMER_Clock()` walks one cycle at a time applying ticks that change nothing — 55M ticks produced 1561 events in a measured run. Defers the counters and schedules the next event in closed form. | `TIMER_Clock` 2295M → 38M retired instructions; whole program 7865M → 5608M. Worst case on a microbenchmark with timers actually programmed: 691 → 184 Ir/call. **Differential test + 9/9 mutants; real-ROM audio unchecked.** |
+| `0002-rom_io-table-driven-unscramble.patch` | `unscramble()` rebuilds two fixed bit permutations a bit at a time per byte — ~28 tests over 2–3 MB of wave ROM. Precomputes 8.25 KiB of tables. | 5.1x faster startup. **Equivalence proved exhaustively.** |
 
 ### Proofs
 
-Both patches have ROM-free tests under `tests/`, because both transformations
-are decidable without any audio:
+Both have ROM-free tests, because both transformations are decidable without
+audio:
 
 ```bash
 g++ -O2 -std=c++23 -o /tmp/ut patches/tests/unscramble_equivalence.cpp && /tmp/ut
-g++ -O2 -std=c++17 -o /tmp/tt patches/tests/timer_step_equivalence.cpp && /tmp/tt
+./patches/tests/timer_closed_form/run.sh
 ```
 
-- `unscramble_equivalence` checks all 256 data bytes and all 8388608 addresses.
-- `timer_step_equivalence` checks all 1024 divider configurations over 9.3M loop
-  cases, comparing both the set of cycles the timers are clocked on *and* the
-  final `timer.cycles`. It is known to be capable of failing: it rejects an
-  earlier draft of 0001 that overshot the loop bound.
+- `unscramble_equivalence` checks all 256 data bytes and all 8388608 addresses
+  against the original loops.
+- `timer_closed_form/` builds the core's real `mcu_timer.cpp` **twice in one
+  program** — upstream in namespace `ref`, patched in `neu` — and drives both
+  through the same operations, comparing `timer.cycles`, the interrupt bitset
+  and every byte read back through the public accessors. 9.6M operations over
+  480 randomised runs, zero mismatches. Field-by-field comparison would be
+  wrong: the patch deliberately leaves counters stale and syncs on demand, so
+  what is claimed is *observational* equivalence.
 
-These prove the transformations, not the emulation. Run the digest comparison
-above with real ROMs before trusting either in production.
+Both suites are known to be capable of failing. `timer_mutants.sh` breaks the
+patched timer nine ways — overshooting the bound, ignoring clear-on-match,
+dropping the overflow event, failing to sync before a register read — and all
+nine are caught.
+
+There is one further piece of evidence for 0001 worth knowing about. On the
+placeholder-ROM profile, **every other function in the emulator retires a
+bit-identical instruction count**: `PCM_Update` 2,216,305,770 in both,
+`SM_Update` 905,602,761, `MCU_Interrupt_Handle` 320,207,643, `calc_tv`,
+`PCM_ReadROM`, `MCU_Read`, `SM_Read` all unchanged to the instruction. The
+emulated MCU executed exactly the same instruction stream. That is not proof
+across all ROMs, but it is a great deal stronger than a digest of silence.
 
 ### Two mistakes worth not repeating
 
