@@ -409,6 +409,15 @@ void SelftestThread(const Options &options, int rate)
 
     printf("sc55d: selftest sequence finished (%zu events)\n", events.size());
     fflush(stdout);
+
+    /* End the run.  --selftest is a one-shot check, not a mode to be killed
+     * out of: without this the render and output loops keep spinning on
+     * !g_quit and the daemon plays on until a signal arrives.  The tail is
+     * for the last notes' release envelopes and for the render-ahead ring to
+     * drain, so the check does not end by cutting itself off. */
+    for (int i = 0; i < 20 && !g_quit.load(std::memory_order_relaxed); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    g_quit.store(true, std::memory_order_relaxed);
 }
 
 void MidiThread(const Options &options)
