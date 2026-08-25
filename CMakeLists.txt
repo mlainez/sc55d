@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 
 cmake_minimum_required(VERSION 3.20)
-project(sc55d VERSION 0.2.0 LANGUAGES C CXX)
+project(sc55d VERSION 0.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)          # the emulation core requires C++23
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
