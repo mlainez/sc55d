@@ -4,6 +4,8 @@
 
 This project has been almost entirely written by Claude. It was meant as an exploration in order to increase the performance of Nuked-SC55 to allow it to run on ARM devices such as the rpi3 and rpi4. Be advised. Use at your own risk. Hallucinations may have happened.
 
+Working files have been kept as-is to allow for better transparency. This project is sitting on the side of jcmoyer's Nuked-SC55 fork on purpose, it is mostly composed of patches and tooling. In turns out that these patches actually make a difference but need to be reviewed by humans and people that know what they are doing (not me) before being sent as PR.
+
 **Turn a Raspberry Pi into a Roland SC-55.**
 
 The Roland SC-55 was the desktop MIDI sound module that defined how 1990s game
