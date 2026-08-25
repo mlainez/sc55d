@@ -22,7 +22,9 @@ below for exactly which romsets that covers.
 
 ## Validation status
 
-**The patched core passes all 36 of upstream's own mk2 integration cases.**
+**The patched core passes all of upstream's own mk2 integration cases** — 36
+on master, and all **37** in the decoder2 branch's extended list, the latter
+re-run with 0014 and 0015 in the series.
 
 That is the strongest check available, and it has now been run. `test/integration/`
 in the core's own tree carries 72 real MIDI files and, for each, the **expected
@@ -128,6 +130,8 @@ register.
 | 0011 | `pcm-gate-reverb-injection-switches` | Only 6 of 32 slots inject. Two indirect jumps per slot become one predictable test — **worth more than its instruction count on an in-order A53**. |
 | 0012 | `pcm-skip-dead-fourth-address-step` | Below the `sub_phase_of` threshold the tail *and one of five wave ROM reads* are dead. |
 | 0013 | `submcu-collapse-the-sub-MCU-timer-loop` | `SM_UpdateTimer` runs exactly three iterations per call, mostly decrementing a prescaler. **−2.70%** on real firmware, which programs a reload of 124 against a break-even of 3. |
+| 0014 | `submcu-skip-idle-interrupt-scan` | 0005's trick on the sub-MCU: `SM_HandleInterrupt`'s nine-arm ladder answered from two bytes when nothing is pending. Measured with real ROMs: the function was **5.9% of all instructions**, and **59.7% of its 2.6M calls per audio-second** exit through the new test. |
+| 0015 | `mcu-word-access-fast-path` | One decode-ladder walk for an aligned word instead of two, for the side-effect-free regions only. Small on its own (`MCU_Read` is 2.2% post-decoder2); measured together with 0014 on a Pi 3: **+6.3% worst-second**. |
 
 0008–0012 together are **−21.0% of PCM per tick** with all 32 voices on, and
 between −19.7% and −22.7% across every activity level — they do not depend on
@@ -161,6 +165,14 @@ g++ -O2 -std=c++23 -o /tmp/ut patches/tests/unscramble_equivalence.cpp && /tmp/u
   return value, the log of outward calls *and* every scalar in `mcu_t`, so
   short-circuiting an address that latches the button matrix would be caught.
   Plus `mcu_interrupt.cpp` compiled twice over 7,700,480 machine states.
+- **sm scan** — `submcu.cpp` built twice into one program, upstream renamed
+  `Ref_*`, driven over the guard's entire firing domain exhaustively plus 4M
+  unconstrained random states — 5.0M states, full-struct compare, 3 mutants.
+- **word access** — the patched `MCU_Read16`/`MCU_Write16` against upstream's
+  byte-wise composition over every aligned address in the 20-bit space, all
+  nine romsets, both RAMCR states and five rom2_mask shapes — 15.3M accesses;
+  writes drive lockstep machines and every writable array is compared at the
+  end of each pass. 4 mutants.
 - **pcm** — `pcm.cpp` built twice into a driver that digests the **entire**
   mutable PCM state each tick (ram1, ram2, all 16 KiB of eram, every scalar),
   every sample posted and every interrupt raised. 44 cases over 10 modes,
@@ -206,6 +218,28 @@ under the divider settings in force at that moment; `timer.cycles` persists
 across calls, so if the MCU then programmed a finer divider, cycles that were
 run past would have become live ones. The fix is to clamp to the original exit
 point.
+
+## Measured on the target: mk2 on a Pi 3 at stock clock
+
+The series' bottom line, measured 2026-08-25 on a Pi 3B at its stock 1200 MHz
+with a real `mk2-v1.01` set, decoder2 enabled, PGO trained on the bench plus
+17.mid through the instrumented daemon on the board itself:
+
+```
+                                        worst second   digest
+decoder2 + 12 patches                   0.909-0.911x   6154f44b25c3b441
+ + 0014 + 0015                          0.963-0.968x   6154f44b25c3b441
+ + PGO (bench + real music)             1.021x  x3     6154f44b25c3b441   holds realtime
+```
+
+The playback test that motivated all of it: 17.mid, a 297 s track whose dense
+passages defeated every earlier build (392 xruns on the shipping binary,
+25,243 starves on the previous best), played through the production
+configuration (640-frame periods, render-ahead 7, SCHED_FIFO, jack):
+
+```
+0 starves, 1 xrun, ring never below 3 of 7 periods
+```
 
 ## Upstream's assessment, and what decoder2 changes
 

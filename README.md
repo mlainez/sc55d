@@ -223,7 +223,7 @@ late while the emulator was fine — more buffer or better isolation is the answ
 | [Performance](docs/performance.md) | What was measured and what to change: build flags, model choice, system tuning, profiles, and the hard ceiling |
 | [Testing on a Raspberry Pi](docs/testing.md) | `pi-check.sh`, validating the core patches on your ROMs, and what is *not* yet verified |
 | [Architecture](docs/architecture.md) | The three threads, why only one of them touches the emulator, why this fork, and the repository layout |
-| [Core patches](patches/README.md) | The thirteen performance patches, how they are validated, and what was tried and rejected |
+| [Core patches](patches/README.md) | The performance patches, how they are validated, and what was tried and rejected |
 | [SIMD, GPU offload, ARM libraries](docs/arm-optimization.md) | Whether NEON or the GPU can help (mostly no, and why) — plus the Pi 3 verdict this document got wrong, and what the mistake was |
 | [Backend options](docs/backend-options.md) | What replacing the emulation core would mean — written when a Pi 3 looked unreachable, and marked where that no longer holds |
 
