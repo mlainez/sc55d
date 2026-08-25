@@ -226,6 +226,11 @@ reference rather than a comparison against ourselves. Each patch also has a
 ROM-free equivalence test with deliberate mutants. `-DSC55D_PATCH_CORE=OFF`
 disables them.
 
+Upstream has since assessed the series, and their `development/decoder2` branch
+supersedes one patch of it and is where further work should be based. What that
+overturns, what it does not, and the measurements behind the disagreement are in
+[patches/README.md § Upstream's assessment](../patches/README.md#upstreams-assessment-and-what-decoder2-changes).
+
 The **mk1** family is validated too, on hardware: patched and unpatched builds
 render the benchmark sequence to the identical digest `c090f4a7b860f585` on a
 Pi 3. Remaining romsets — the JV-880 especially — are **not** validated, because

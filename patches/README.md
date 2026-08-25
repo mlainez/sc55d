@@ -117,7 +117,7 @@ register.
 |---|---|---|
 | 0001 | `mcu_timer-closed-form-advancement` | Defers the counters, schedules the next event in closed form. `TIMER_Clock` **2295M → 38M**. |
 | 0002 | `rom_io-table-driven-unscramble` | Two fixed bit permutations into 8.25 KiB of tables. **5.1x faster startup**. |
-| 0003 | `mcu-code-fetch-fast-path` | ROM cases answered in the header. −0.36%, **better on real ROMs**. |
+| 0003 | `mcu-code-fetch-fast-path` | ROM cases answered in the header. −0.36%, **better on real ROMs**. **Superseded by upstream's decoder2** — see below. |
 | 0004 | `mcu_step-hoist-fixed-work` | `has_submcu` decided once; ADCSR tested at the call site. −0.96%. |
 | 0005 | `mcu_interrupt-skip-fully-masked-scan` | Early return when the mask is 7. −2.64% here, **but that is an artefact**. |
 | 0006 | `mcu-hot-field-layout` | Per-instruction fields into the first 336 bytes of `mcu_t`. **−5 instructions per emulated instruction on AArch64**; ~0 on x86. |
@@ -206,6 +206,127 @@ under the divider settings in force at that moment; `timer.cycles` persists
 across calls, so if the MCU then programmed a finer divider, cycles that were
 run past would have become live ones. The fix is to clamp to the original exit
 point.
+
+## Upstream's assessment, and what decoder2 changes
+
+The fork's maintainer was sent this series and replied. Paraphrasing their
+points: many of the smaller patches "should have no measurable effect" because
+"compilers can do a lot of these transformations automatically"; the ones that
+hoist conditions to the caller are "made redundant by
+`CMAKE_INTERPROCEDURAL_OPTIMIZATION=ON`"; the instruction-fetch work is
+"invalidated" by their `development/decoder2` branch; and any further
+performance work should be based on that branch
+(`-DNUKED_ENABLE_DECODER2=ON`, to become the default in 0.7.0), which caches
+decoded instructions and avoids `MCU_Read` for the majority of memory loads —
+possibly enough to run mk2 romsets on a Pi 3. Memory layout and cache
+efficiency are on their list for after 0.7.0: *"I know the large structures are
+not ideal."*
+
+Most of that is right. One part is measurably not, and the difference is worth
+being precise about.
+
+### Right: the small MCU patches are noise
+
+Their prediction matches what this file already records. 0003 is −0.36%, 0004
+is −0.96%, and 0005's −2.64% is an artefact of placeholder firmware whose real
+worst case is a ~0.08% *loss*. Three patches, about 1% between them, one of
+which may be negative on real ROMs. Nothing in the series' headline depends on
+them.
+
+### Right: 0003 is superseded
+
+Confirmed from the branch rather than assumed. decoder2 replaces the body of
+`MCU_ReadInstruction` with a call to `decoder2::FetchDecodeExecuteNext(mcu)`,
+so `MCU_ReadCodeAdvance` — the function 0003 fast-paths — is no longer on the
+hot path at all. 0003 should be dropped when we move, not rebased.
+
+### Right: decoder2 is where to work next, and moving is cheap
+
+The branch is 63 commits and +10,628 lines, but almost all of it is new files
+under `src/backend/decoder2/`. Outside that directory it touches
+`mcu.cpp` (6 lines), `mcu.h` (17), `rom_loader.cpp` (12), plus build glue.
+`pcm.cpp`, `mcu_timer.cpp`, `submcu.cpp`, `mcu_interrupt.cpp` and `rom_io.cpp`
+are untouched.
+
+So the series survives the move nearly intact. Applied in order against
+`origin/development/decoder2` at `36fb091`, exactly as CMake applies them:
+
+```
+12 of 13 apply clean
+0006-mcu-hot-field-layout.patch   hunk 4 of 4 rejected
+```
+
+0006's rejected hunk is the tail of `mcu_t`, where decoder2 appends an
+`icache` member. That is a context conflict, not a design conflict — rebasing
+it means deciding where `icache` belongs in the reordered struct, which is the
+patch's whole subject anyway.
+
+### Not right: IPO cannot make them redundant, because IPO was already on
+
+`CMakeLists.txt` sets `CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON`, and
+compiles the core's translation units *into the sc55d executable target* rather
+than linking a separate library, so the compiler sees core and frontend as one
+unit before LTO even runs. Both sides of the measurement were built that way —
+`build-patch-off.log` and `build-patch-on.log` each open with `sc55d:
+link-time optimization enabled`.
+
+The **+43.5% realtime ratio and −45.1% retired instructions are therefore a
+measurement taken with `CMAKE_INTERPROCEDURAL_OPTIMIZATION=ON` on both sides**,
+which is the configuration the claim says should erase them. Turning LTO off
+costs a further +8.9% on its own, so the two are additive rather than
+substitutes.
+
+The reason is what the patches carrying the weight actually do. None of these
+is a transformation a compiler performs:
+
+| | Why no compiler does it |
+|---|---|
+| 0001, `TIMER_Clock` 2295M → 38M | Replaces an iterative countdown with a closed-form next-event calculation. Algorithmic. |
+| 0002, 5.1x startup | Materialises two fixed bit permutations as 8.25 KiB of tables. |
+| 0006, 0007 | Reorders struct members. Layout is ABI — a compiler is *forbidden* from doing this. |
+| 0008–0012, −21.0% of PCM per tick | Hoists invariants out of a path that recomputed them 97 times per tick, templates on a runtime value, deletes provably dead work. Stable between −19.7% and −22.7% across every activity level. |
+
+### Layout: the part worth comparing notes on
+
+Their post-0.7.0 plan and 0006/0007 are aimed at the same thing, so here is
+what was measured, on decoder2's own `mcu_t` at `36fb091`:
+
+```
+sizeof(mcu_t)          664936 bytes
+offsetof(rom1)              48
+offsetof(uart_buffer)   656616
+offsetof(operand_type)  664892
+offsetof(icache)        664928   (8 bytes -- a handle, not an inline table)
+```
+
+`icache` is fine: 8 bytes, 36 from the operand fields. The cost is that the
+**per-instruction operand fields sit at offset 664892**, behind 649 KiB of ROM
+and RAM arrays — and on AArch64 that is not merely a cache question. A scaled
+12-bit immediate reaches 16380 bytes for a 32-bit load, so a field that deep
+cannot be addressed in one instruction:
+
+```
+             struct field at offset 664892      struct field at offset 48
+aarch64      add x0, x0, 655360                 ldr w0, [x0, 48]
+             ldr w0, [x0, 9532]
+```
+
+Two instructions instead of one, on every access, for every hot field past
+16 KiB. That is the mechanism behind 0006's measured **−5 instructions per
+emulated instruction on AArch64 and ~0 on x86-64** — x86-64 has 32-bit
+displacements, so the deep field costs it nothing and the patch looks pointless
+there. It is measurable in retired instructions without a cache profiler, and
+it is the strongest argument for doing the layout work: on the boards this
+project targets, the large structures cost instructions, not just misses.
+
+### What this does not settle
+
+Whether decoder2 delivers enough to run an mk2 romset on a Pi 3 is unmeasured
+here, and deliberately so. Its benefit is caching *decoded real instructions*
+and skipping `MCU_Read`; a benchmark with placeholder ROMs has both CPUs
+executing mostly invalid opcodes, so it would measure the decode cache against
+trap paths and report a number that means nothing. That comparison needs real
+ROMs, and the answer for a Pi 3 needs a Pi 3.
 
 ## Rejected
 
