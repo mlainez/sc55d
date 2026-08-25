@@ -1,0 +1,41 @@
+submcu: answer the no-interrupt-pending case from two bytes
+
+SM_HandleInterrupt walks nine arms, each three loads and three tests deep, and
+in the common running state -- interrupts enabled, nothing pending -- every arm
+fails and the walk was for nothing. Eight of the nine arms require a bit in
+INT_REQUEST; the collision arm alone keys on COLLISION bits 7:6. So
+INT_REQUEST == 0 together with the collision test failing implies the whole
+ladder falls through with no side effects, and those two loads can answer the
+common case before the walk starts.
+
+This is patch 0005's trick applied to the sub-MCU, and it matters for the same
+reason: the check runs once per sub-MCU instruction, which the mk2 steps 1.25
+times for every main-MCU instruction.
+
+Equivalence is proven the same way as 0005: submcu.cpp compiled twice into one
+program, upstream in one namespace and this patch in the other, driven over
+every reachable (INT_REQUEST, COLLISION, ENABLE, CTRL, cts, sr) combination and
+required to agree on every scalar and every outward call. See
+patches/tests/mcu/sm_interrupt_scan_equivalence.cpp, and its mutants.
+
+--- a/src/backend/submcu.cpp
++++ b/src/backend/submcu.cpp
+@@ -1314,7 +1314,17 @@
+ {
+     if (sm.sr & SM_STATUS_I)
+         return;
+-    
++
++    // Nine arms follow. Eight of them require a bit in INT_REQUEST and the
++    // collision arm alone keys on COLLISION bits 7:6, so in the common running
++    // state -- interrupts enabled, nothing pending -- every arm fails and the
++    // ladder walks some twenty-seven loads to conclude nothing. Answer that
++    // case from the two bytes it actually depends on. This runs once per
++    // sub-MCU instruction, 1.25 times per main-MCU instruction on an mk2.
++    if (sm.device_mode[SM_DEV_INT_REQUEST] == 0
++        && (sm.device_mode[SM_DEV_COLLISION] & 0xc0) != 0xc0)
++        return;
++
+     if ((sm.device_mode[SM_DEV_UART1_CTRL] & 0x8) != 0
+         && (sm.device_mode[SM_DEV_INT_ENABLE] & 0x80) != 0
+         && (sm.device_mode[SM_DEV_INT_REQUEST] & 0x80) != 0)

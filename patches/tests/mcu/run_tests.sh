@@ -58,5 +58,32 @@ for b in 1 2; do
     run "mcu_interrupt_mask_guard (broken $b, must fail)" 1 "$OUT/irq.b$b"
 done
 
+
+# --- 0014: sub-MCU interrupt scan gate -------------------------------------
+# Upstream submcu.cpp is compiled with every global renamed Ref_*, so the
+# patched and pristine handlers can be linked into one program and compared.
+$CXX $FLAGS -c "$CORE/src/backend/submcu.cpp" -o "$OUT/submcu_probe.o"
+SM_RENAMES=$(nm -C --defined-only "$OUT/submcu_probe.o" \
+    | awk '$2=="T"||$2=="D"{sub(/\(.*/,"",$3); print $3}' | sort -u \
+    | awk '{printf "-D%s=Ref_%s ", $1, $1}')
+# shellcheck disable=SC2086
+$CXX $FLAGS $SM_RENAMES -c "$PRISTINE/src/backend/submcu.cpp" -o "$OUT/ref_submcu.o"
+SM_SRC="$HERE/sm_interrupt_scan_equivalence.cpp $CORE/src/backend/submcu.cpp $OUT/ref_submcu.o"
+$CXX $FLAGS -o "$OUT/smscan" $SM_SRC
+run sm_interrupt_scan_equivalence 0 "$OUT/smscan"
+for b in 1 2 3; do
+    $CXX $FLAGS -DBREAK_SCAN=$b -o "$OUT/smscan.b$b" $SM_SRC
+    run "sm_interrupt_scan (broken $b, must fail)" 1 "$OUT/smscan.b$b"
+done
+
+# --- 0015: word access fast path --------------------------------------------
+$CXX $FLAGS -o "$OUT/word" "$HERE/mcu_word_access_equivalence.cpp" "$CORE/src/backend/mcu.cpp"
+run mcu_word_access_equivalence 0 "$OUT/word"
+for b in 1 2 3 4; do
+    $CXX $FLAGS -DBREAK_WORD=$b -o "$OUT/word.b$b" \
+        "$HERE/mcu_word_access_equivalence.cpp" "$CORE/src/backend/mcu.cpp"
+    run "mcu_word_access (broken $b, must fail)" 1 "$OUT/word.b$b"
+done
+
 [ "$fail" = 0 ] && echo "all tests behaved as expected" || echo "SOMETHING BEHAVED UNEXPECTEDLY"
 exit $fail
