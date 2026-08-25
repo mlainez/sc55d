@@ -19,8 +19,11 @@ sc55d is the part that gets MIDI in, audio out, and both of those done in time.
 
 ## What you'll need
 
-- **A Raspberry Pi 4 or 5.** A Pi 3 can manage it, but only with the tuning in
-  [Performance](docs/performance.md) — read that first if a Pi 3 is what you have.
+- **A Raspberry Pi 4 or 5**, or a **Pi 3** for the mk1-generation romsets.
+  Measured: a Pi 3 renders SC-55 mk1 at 1.39x realtime and cannot run the mkII
+  romsets (0.81x, under realtime); a Pi 4 runs both, at 2.92x and 1.69x. A DAC
+  is optional — the onboard jack holds mk1 on a Pi 3 with zero dropouts. See
+  [Performance](docs/performance.md).
 - **Raspberry Pi OS Lite, 64-bit.** The 32-bit image is markedly slower here.
 - **SC-55 ROM files** — the original module's firmware and sounds. sc55d ships
   none of it; the ROMs are Roland's copyright and have to come from hardware you
@@ -163,8 +166,10 @@ In rough order of how much they help — the reasoning behind each one is in
 5. **Emulate a cheaper machine.** `--model scb55` is the same sound engine
    without the front panel, and skipping that second processor saves about 15%
    of all the work. On a Pi 3 this can be the difference between working and not.
-6. **Check the small things.** Avoid the 3.5 mm jack, keep the board cool
-   (`vcgencmd get_throttled`), and turn off Wi-Fi power saving on a wired box.
+6. **Check the small things.** If you are on the 3.5 mm jack, give it
+   `--period-frames 512 --periods 4` — it will not sustain the short periods a
+   DAC is happy with. Keep the board cool (`vcgencmd get_throttled`), and turn
+   off Wi-Fi power saving on a wired box.
 
 sc55d distinguishes the two failure modes for you at shutdown. **Starves** mean
 the emulator itself could not keep up — a faster board, better build flags or a

@@ -34,6 +34,13 @@ and the total is printed at shutdown.
 On a Pi 3, `--period-frames 512 --periods 4` is about 31 ms and far harder to
 starve than the 11.6 ms default.
 
+**On the onboard 3.5 mm jack this is not optional.** bcm2835 audio crosses to
+the VideoCore over VCHIQ, a round trip per period, and it will not sustain short
+ones: measured on a Pi 3 at 64000, `128 × 3` produced 1487 xruns in 25 s and
+`256 × 3` produced 1302, while `480 × 3` and everything above it produced none.
+ALSA is no help — the jack advertises `PERIOD_SIZE` from 80 frames and then
+underruns far above that. An I²S DAC has no such floor.
+
 ## Render-ahead: using a second core
 
 `--render-ahead <n>` is what lets sc55d use a second core: the render thread

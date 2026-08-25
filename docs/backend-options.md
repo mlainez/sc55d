@@ -1,7 +1,21 @@
 # Moving off Nuked-SC55: what a high-level backend would mean
 
+> **Superseded in part — read this first.** This investigation was written when
+> Nuked-SC55 would not run on a Pi 3, and it concluded that micro-optimisation
+> could not close the gap. That conclusion was wrong, and the measurements are
+> in [performance.md](performance.md): the thirteen core patches are worth
+> **+93.8%** on a Pi 3, taking SC-55 mk1 from 0.715x to **1.386x realtime**. The
+> board runs the mk1 romsets today, through the onboard jack, with no dropouts.
+>
+> What still stands: a Pi 3 cannot run the **mkII** romsets (0.811x patched),
+> Munt remains structurally unable to emulate an SC-55, and libEmuSC remains the
+> only real alternative if the non-commercial licence is a problem. The document
+> is kept because the analysis of *why* the core is expensive is still accurate
+> and still useful — only its verdict on what optimisation could achieve was
+> falsified.
+
 An investigation into replacing the emulation core, prompted by the observation
-that mt32-pi runs on a Pi 3 and this does not.
+that mt32-pi ran on a Pi 3 and this did not.
 
 **Summary:** Munt cannot be used for the SC-55 at all — it is structurally an
 MT-32 emulator. The real candidate is **libEmuSC**, and it is a more serious
@@ -418,6 +432,14 @@ Decide on the target hardware first, because it settles everything else:
   architectural cost, and it makes the fidelity/cost trade a runtime decision
   for whoever deploys it.
 
-What should not happen is more micro-optimisation of Nuked-SC55 in the hope of
+~~What should not happen is more micro-optimisation of Nuked-SC55 in the hope of
 reaching a Pi 3. The gap is 2.5–3.5x and the techniques left are worth single
-digits each.
+digits each.~~
+
+**That was wrong, and it is left here rather than deleted because being wrong in
+a specific, checkable way is the useful part.** The techniques left were not
+worth single digits each: thirteen of them compounded to +93.8% on a Pi 3, which
+was enough. The error was estimating the gap from x86 profiling — on an in-order
+Cortex-A53 the same removed work is worth roughly twice what it is worth on an
+out-of-order Xeon, and that factor is exactly what closed it. Measure on the
+target before concluding what the target cannot do.

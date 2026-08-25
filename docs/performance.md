@@ -20,6 +20,45 @@ That is **+43.5%**, and it corroborates the −45.1% drop in retired instruction
 measured separately. The patches are validated bit-identical on this romset —
 see [patches/README.md](../patches/README.md).
 
+### On ARM, where it matters more
+
+The x86 figure understates it badly. Measured on real boards, same 30-second
+dense sequence, patched and unpatched cross-compiled identically with GCC 14.3
+and `-mcpu=` matched to the board, `performance` governor, no throttling:
+
+| board | romset | unpatched | patched | |
+|---|---|---|---|---|
+| **Pi 3** (A53, 1200 MHz) | **mk1** | **0.715x** | **1.386x** | +93.8% |
+| Pi 3 | mk2 | 0.458x | 0.811x | +77.1% |
+| **Pi 4** (A72, 1500 MHz) | mk1 | 1.497x | 2.916x | +94.8% |
+| **Pi 4** | **mk2** | **0.928x** | **1.691x** | +82.2% |
+
+**The patches roughly double throughput on ARM** — about twice what they give an
+out-of-order Xeon (+43.5%). That is the expected direction: work removed is work
+genuinely saved on an in-order A53, where a wide out-of-order core hides some of
+it. The A72 is out-of-order too and still gains ~90%, so most of it is real work
+removed rather than scheduling luck.
+
+Two rows carry the whole argument for this repo existing, and they are the two
+in bold:
+
+- **mk1 on a Pi 3 renders at 0.715x unpatched** — nowhere near realtime.
+  Patched it clears it with 39% to spare.
+- **mk2 on a Pi 4 renders at 0.928x unpatched** — still under. Patched, 1.691x.
+
+So on both boards, for the romset each is actually asked to run, the patches are
+not a tuning option. They are the difference between working and not. The only
+combination that runs unpatched is mk1 on a Pi 4, at 1.497x.
+
+The other thing these numbers settle: **a Pi 3 cannot run the mkII romsets.**
+0.811x is under realtime and no amount of buffering fixes a renderer that cannot
+keep up — it only delays the dropout.
+
+Every digest above is **identical between the patched and unpatched builds**,
+and identical between the Pi 3, the Pi 4 and x86-64: `c090f4a7b860f585` for mk1,
+`6154f44b25c3b441` for mk2. The patches are bit-exact, and the emulation agrees
+across architectures on real hardware rather than only under qemu.
+
 Where the time goes with real firmware, unpatched: `PCM_Update` 31.4%,
 `TIMER_Clock` 26.0%, `SM_Update` 11.9%, `unscramble` 4.2% (startup),
 `PCM_ReadROM` 3.7%, `calc_tv` 3.5%.
@@ -148,10 +187,30 @@ isolcpus=3 nohz_full=3 rcu_nocbs=3 irqaffinity=0-2
   more than the whole rest of the output path. These are x86 numbers, so read
   the *ratios*, not the absolute microseconds.
 
-- **Avoid the 3.5 mm jack.** It is PWM-driven, sounds poor, and adds work. An
-  I²S DAC HAT or a USB DAC is better on both counts.
+- **The 3.5 mm jack works, with one caveat.** An I²S DAC HAT or USB DAC still
+  sounds better — the jack is PWM-driven out of a divided clock — but it does
+  **not** cost the renderer anything and it does **not** resample: bcm2835
+  accepts 8000–192000 Hz, and sc55d was measured running on it at the mk1's
+  native 64000 (`rate: 64000 (64000/1)`). A Pi 3 with no DAC at all holds mk1 at
+  1.43x realtime with zero dropouts across a 20-minute soak.
+
+  What it will not do is short periods. ALSA advertises `PERIOD_SIZE` from 80
+  frames and then underruns continuously well above that, because bcm2835 audio
+  goes to the VideoCore over VCHIQ — one round trip per period, where an I²S DAC
+  uses DMA. Measured on a Pi 3 at 64000, 25 s of real music each:
+
+  | | | | |
+  |---|---|---|---|
+  | `128 × 3` | 1487 xruns | `480 × 4` | 0 xruns |
+  | `256 × 3` | 1302 xruns | `512 × 4` | 0 xruns |
+  | `480 × 3` | 0 xruns | `1024 × 4` | 0 xruns |
+
+  So the floor is between 4 ms and 7.5 ms of period time. Give the jack
+  `--period-frames 512 --periods 4` or more and it is solid; the 128-frame
+  settings that suit a DAC will fail on it continuously.
 - **Trade latency for safety on a Pi 3.** `--period-frames 512 --periods 4` is
-  about 31 ms and far harder to starve than the 11.6 ms default.
+  about 31 ms and far harder to starve than the 11.6 ms default — and, per the
+  table above, it is also the setting the onboard jack needs.
 - **Watch thermals.** A Pi 3B+ throttles without a heatsink; check
   `vcgencmd get_throttled`.
 - Bluetooth is already disabled if you followed the serial MIDI setup; also turn
@@ -167,8 +226,10 @@ reference rather than a comparison against ourselves. Each patch also has a
 ROM-free equivalence test with deliberate mutants. `-DSC55D_PATCH_CORE=OFF`
 disables them.
 
-Romsets other than the mk2 family are **not** validated — no ROMs for them were
-available. If you run one, especially the JV-880, run
+The **mk1** family is validated too, on hardware: patched and unpatched builds
+render the benchmark sequence to the identical digest `c090f4a7b860f585` on a
+Pi 3. Remaining romsets — the JV-880 especially — are **not** validated, because
+no ROMs for them were available. If you run one, run
 [`scripts/validate-patches.sh`](../scripts/validate-patches.sh) first. [patches/README.md](../patches/README.md) has the details, plus
 what was measured and rejected.
 
