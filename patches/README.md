@@ -120,8 +120,8 @@ register.
 | 0001 | `mcu_timer-closed-form-advancement` | Defers the counters, schedules the next event in closed form. `TIMER_Clock` **2295M → 38M**. |
 | 0002 | `rom_io-table-driven-unscramble` | Two fixed bit permutations into 8.25 KiB of tables. **5.1x faster startup**. |
 | 0003 | `mcu-code-fetch-fast-path` | ROM cases answered in the header. −0.36%, **better on real ROMs**. **Superseded by upstream's decoder2** — see below. |
-| 0004 | `mcu_step-hoist-fixed-work` | `has_submcu` decided once; ADCSR tested at the call site. −0.96%. |
-| 0005 | `mcu_interrupt-skip-fully-masked-scan` | Early return when the mask is 7. −2.64% here, **but that is an artefact**. |
+| 0004 | `mcu_step-hoist-fixed-work` | `has_submcu` decided once; ADCSR tested at the call site. **+1.39% audited on real ROMs** — bigger than the old placeholder figure. |
+| 0005 | `mcu_interrupt-skip-fully-masked-scan` | Early return when the mask is 7. The old −2.64% was a placeholder artefact; **audited on real ROMs at +0.17%** — small, real, and the feared worst-case loss did not materialize. |
 | 0006 | `mcu-hot-field-layout` | Per-instruction fields into the first 336 bytes of `mcu_t`. **−5 instructions per emulated instruction on AArch64**; ~0 on x86. |
 | 0007 | `pcm-hot-field-layout` | `enable_oversampling` sat at offset 15,763,532, past 15 MB of wave ROM, alone in a cache line, read once per sample. |
 | 0008 | `pcm-hoist-calc-tv-per-tick-invariants` | Per-tick tap table + 256-byte type table instead of 97 recomputations per tick. |
@@ -240,6 +240,64 @@ configuration (640-frame periods, render-ahead 7, SCHED_FIFO, jack):
 ```
 0 starves, 1 xrun, ring never below 3 of 7 periods
 ```
+
+## The audit: every patch measured alone
+
+Before approaching upstream with any of this, every patch in the decoder2
+series was measured in isolation (2026-08-26), on two axes: retired
+instructions per audio-second on x86-64 with real mk2 ROMs (leave-one-out
+builds under callgrind, differential between two bench lengths so fixed costs
+cancel), and, for the patches whose value is claimed to be specific to an
+in-order Cortex-A53, worst-second wall-clock on the Pi 3B at stock 1200 MHz
+(fresh cross-builds, interleaved rotations, pre-declared 0.006 noise floor).
+Every one of the 17 x86 builds and all 32 board runs — including a fully
+unpatched control — rendered the reference digest `6154f44b25c3b441`.
+
+**The verdict is that no patch is removable.** What removing each one costs:
+
+| patch | x86, of full-series Ir/s | Pi 3, worst-second |
+|---|---|---|
+| 0001 timer closed-form | **+80.86%** | — |
+| 0002 unscramble tables | steady-state zero by design; **0.62 G instructions at boot** | — |
+| 0004 mcu_step hoist | +1.39% | — |
+| 0005 interrupt mask guard | +0.17% | — |
+| 0006 mcu hot-field layout | exactly zero | **−2.7%** |
+| 0007 pcm hot-field layout | exactly zero | **−0.46%** |
+| 0008 calc_tv invariants¹ | +3.08% | — |
+| 0009 address-step algebra¹ | +1.46% | — |
+| 0010 calc_tv template | +2.78% | — |
+| 0011 reverb-injection gate | +0.36% | **−0.51%** |
+| 0012 dead fourth step | +3.51% | — |
+| 0013 SM timer collapse | +2.30% | — |
+| 0014 SM scan gate | **+5.49%** | — |
+| 0015 word fast path | +0.92% | — |
+
+¹ 0008 and 0009 cannot be removed independently — the later PCM patches need
+their context, so both leave-one-out configures fail. Their figures are
+in-order marginals from prefix builds; the five PCM patches' marginals sum to
+11.20% against a collectively measured 11.22%, so nothing hides in the gap.
+
+Three cross-checks make the numbers defensible one by one:
+
+- **Additivity, x86**: the per-patch contributions sum to 102.32% against a
+  directly measured full-vs-unpatched gap of 102.35% (the whole series takes
+  3,198 M down to 1,581 M instructions per audio-second on real ROMs, −50.6%).
+- **Additivity, board**: 0006 + 0007 + 0011 individually sum to 3.67% against
+  a measured remove-all-three aggregate of 3.66%.
+- **Metric floor**: repeated callgrind runs of one binary differ by 30
+  instructions in 13.2 G, so even 0005's +0.17% is orders of magnitude above
+  noise; the board's floor is ±0.006 worst-second and both sub-1% board
+  deltas were resolved by doubling the rotations.
+
+The audit also settles the two historical doubts this file used to carry:
+0004's placeholder-ROM figure understated it, and 0005 — whose old gain was
+an artefact and whose theoretical worst case was a small loss — is a small,
+real gain on real firmware.
+
+**0003 is retired, not deleted**: decoder2 removes its target from the hot
+path, so the decoder2 series (the default) excludes it; it still applies and
+still helps on a pre-decoder2 master checkout via `-DNUKED_DIR`, which is the
+only reason the file stays.
 
 ## Upstream's assessment, and what decoder2 changes
 
