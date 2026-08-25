@@ -1,5 +1,23 @@
 # SIMD, GPU offload, and ARM libraries
 
+> **Notice: this document's Pi 3 verdict was disproven on real hardware.**
+> It concluded that a Pi 3 running Nuked-SC55 in realtime was "out of reach",
+> around 2.5–3.5x short. Measured since, on an actual Pi 3 Model B: SC-55 **mk1
+> renders at 1.386x realtime** with the core patches, up from 0.715x without
+> them. The board runs the mk1 romsets today.
+>
+> Interestingly the hardware model here was roughly right — it predicted a Pi 3
+> at 0.40x of a Pi 4 and the measurement says 0.475x. The mistake was assuming
+> optimisation was nearly exhausted, by anchoring on someone else's optimised
+> build as if it were the ceiling. It was not: thirteen further patches were
+> worth **+93.8%** on ARM, roughly double their +43.5% on x86.
+>
+> What still stands: everything in the table below. NEON, the GPU and ARM DSP
+> libraries were correctly rejected, and the gains came from exactly where this
+> document says to look — scalar work removal, ranked at the end. A Pi 3 still
+> cannot run the **mkII** romsets (0.811x). Numbers in
+> [performance.md](performance.md).
+
 Whether a Raspberry Pi's vector unit, its GPU, or an off-the-shelf ARM-optimised
 library can be pointed at this workload. Short answers first:
 
@@ -16,9 +34,10 @@ All line references are to the `vendor/nuked-sc55` submodule.
 
 ## Why this is so much heavier than mt32-pi
 
-mt32-pi runs comfortably on a Pi 3. It is reasonable to ask why an SC-55 cannot.
-The answer is not that mt32-pi is better written — it is solving a fundamentally
-cheaper problem.
+mt32-pi runs comfortably on a Pi 3, and for a long time this did not. It is
+reasonable to ask why. The answer is not that mt32-pi is better written — it is
+solving a fundamentally cheaper problem, and that remains true even now that
+both run on the same board.
 
 **Munt, which mt32-pi uses, is a high-level emulator.** It reads the MT-32's
 ROMs and reimplements LA synthesis — partials, envelopes, filters — as ordinary
@@ -53,13 +72,34 @@ author optimised specifically for this: they got a **Pi 4 at stock 1.8 GHz to
 same work took CPU from 39–41% down to 26–28%.
 
 A Pi 3 is about 1.2 GHz, and its Cortex-A53 is *in-order* where the Pi 4's A72 is
-out-of-order — call it 0.6x the work per clock, and 0.67x the clock. That puts a
-Pi 3 somewhere around **2.5–3.5x short of realtime**, optimised. Nothing in this
-document closes a gap that size.
+out-of-order — call it 0.6x the work per clock, and 0.67x the clock.
 
-So: a Pi 4 is plausible and a Pi 5 is comfortable, but **a Pi 3 running
-Nuked-SC55 in realtime looks out of reach**, and honest planning should assume
-it. `scripts/pi-check.sh --roms <dir>` on the actual board is what settles it.
+~~That puts a Pi 3 somewhere around **2.5–3.5x short of realtime**, optimised.
+Nothing in this document closes a gap that size. So: a Pi 4 is plausible and a
+Pi 5 is comfortable, but **a Pi 3 running Nuked-SC55 in realtime looks out of
+reach**, and honest planning should assume it.~~
+
+**Disproven.** Measured on the actual boards:
+
+| | mk1 unpatched | mk1 patched |
+|---|---|---|
+| Pi 3 | 0.715x | **1.386x** |
+| Pi 4 | 1.497x | 2.916x |
+
+The board-to-board model above was close — it predicted 0.40x and the ratio
+measures 0.475x, so the A53/A72 reasoning was sound. **The error was the
+baseline.** This section took PR #51's optimised Pi 4 result as roughly the
+ceiling of what optimisation could reach, and reasoned down from it. It was not
+the ceiling: thirteen further patches were worth +93.8% on a Pi 3, and 0.715x
+became 1.386x.
+
+The lesson is narrower than "we were pessimistic". Estimating a target's
+capability by scaling someone else's result on different hardware compounds two
+unknowns — their headroom and the hardware ratio — and only one of them was
+checkable from here. `scripts/pi-check.sh --roms <dir>` on the actual board is
+what settles it, and running it earlier would have settled it sooner.
+
+A Pi 3 still cannot run the **mkII** romsets: 0.811x patched, under realtime.
 
 ### What is worth borrowing
 
@@ -520,9 +560,11 @@ Ranked by measured evidence rather than novelty:
 5. **`patches/candidates/0001`** — the sub-MCU timer loop, worth about 1% on an
    mk2 *if* the firmware's prescaler reload is 3 or more, and a regression
    below that. One measurement on real hardware decides it.
-6. **Re-profile on the target with real ROMs.** Everything above was measured
-   on x86-64 with placeholder ROMs. Everything above was measured on
-   x86-64 with placeholder ROMs, which under-represents the MCU interpreter. The
-   ranking could change; `--bench` and callgrind are all it takes.
+6. ~~**Re-profile on the target with real ROMs.**~~ **Done.** Everything above
+   was measured on x86-64 with placeholder ROMs, which under-represents the MCU
+   interpreter. Re-measured on real boards with real ROMs, the patches are worth
+   +93.8% on a Pi 3 and +94.8% on a Pi 4 — roughly double the +43.5% seen on
+   x86-64, and enough to move a Pi 3 from 0.715x to 1.386x realtime. The ranking
+   did not change; its magnitude did.
 
 Not on this list: NEON and the GPU.

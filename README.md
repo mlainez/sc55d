@@ -17,6 +17,39 @@ cycle-accurate model of the real hardware, used here through the
 [jcmoyer fork](https://github.com/jcmoyer/Nuked-SC55) in `vendor/nuked-sc55`.
 sc55d is the part that gets MIDI in, audio out, and both of those done in time.
 
+## What the numbers say
+
+Realtime ratio — seconds of audio produced per second of wall clock. **1.0x is
+the line**; below it the board cannot keep up and no amount of buffering fixes
+it. Measured on the boards themselves, patched and unpatched builds compiled
+identically:
+
+| board | romset | unpatched | with `patches/` |
+|---|---|---|---|
+| **Pi 3** | **mk1 / SC-155** | **0.715x** | **1.386x** |
+| Pi 3 | mkII | 0.458x | 0.811x — still too slow |
+| Pi 4 | mk1 / SC-155 | 1.497x | 2.916x |
+| **Pi 4** | **mkII** | **0.928x** | **1.691x** |
+
+Three things worth taking from that table.
+
+**The core patches are not a tuning option.** For the romset each board is
+actually asked to run, they are the difference between working and not: mk1 on a
+Pi 3 is 0.715x without them, mkII on a Pi 4 is 0.928x. Both are under realtime.
+The only combination that runs unpatched is mk1 on a Pi 4.
+
+**They are worth about twice as much on ARM as on x86** — +94% on a Pi 3 against
++43.5% on a Xeon. Removed work is genuinely saved on an in-order Cortex-A53,
+where a wide out-of-order core hides some of it.
+
+**A Pi 3 still cannot run the mkII romsets.** 0.811x is under realtime, and that
+is the honest boundary of what this does.
+
+The patches are validated **bit-identical** to the unpatched core — same audio
+digest on a Pi 3, a Pi 4 and x86-64 — and the patched core passes all 36 of
+upstream's own SC-55mk2 integration cases byte for byte. Details and method:
+[Performance](docs/performance.md), [Core patches](patches/README.md).
+
 ## What you'll need
 
 - **A Raspberry Pi 4 or 5**, or a **Pi 3** for the mk1-generation romsets.
@@ -28,8 +61,12 @@ sc55d is the part that gets MIDI in, audio out, and both of those done in time.
 - **SC-55 ROM files** — the original module's firmware and sounds. sc55d ships
   none of it; the ROMs are Roland's copyright and have to come from hardware you
   own. See [ROMs](#roms) below.
-- **Somewhere for the audio to go.** A USB audio adapter or an I²S DAC HAT is
-  best; the Pi's own 3.5 mm jack works but sounds poor.
+- **Somewhere for the audio to go.** A USB audio adapter or an I²S DAC HAT
+  sounds best. The Pi's own 3.5 mm jack is noisier — it is PWM-driven — but it
+  does work, and it does not cost the emulator anything: it takes the mk1's
+  native 64000 Hz without resampling. It does need a longer period than a DAC
+  (`--period-frames 512 --periods 4`), which is measured in
+  [Performance](docs/performance.md).
 - **Something to send MIDI** — a MIDI file player on the same Pi, another
   machine on the network, or a real MIDI socket wired to the Pi's serial port.
   See [Getting MIDI in](docs/midi-input.md).
@@ -91,7 +128,7 @@ it with `aconnect`:
 ```bash
 ./build/sc55d --roms /path/to/roms &   # sc55d shows up as 'sc55d'
 aconnect -l                            # list what's available
-aconnect 'ttymidi':0 'sc55d':0         # send that device's MIDI to sc55d
+aconnect 'SerialMIDI-0':0 'sc55d':0    # send that device's MIDI to sc55d
 ```
 
 Full details, including how to wire a real MIDI DIN socket to the Pi's serial
@@ -187,8 +224,8 @@ late while the emulator was fine — more buffer or better isolation is the answ
 | [Testing on a Raspberry Pi](docs/testing.md) | `pi-check.sh`, validating the core patches on your ROMs, and what is *not* yet verified |
 | [Architecture](docs/architecture.md) | The three threads, why only one of them touches the emulator, why this fork, and the repository layout |
 | [Core patches](patches/README.md) | The thirteen performance patches, how they are validated, and what was tried and rejected |
-| [SIMD, GPU offload, ARM libraries](docs/arm-optimization.md) | Whether NEON or the GPU can help (mostly no, and why) |
-| [Backend options](docs/backend-options.md) | What replacing the emulation core would mean |
+| [SIMD, GPU offload, ARM libraries](docs/arm-optimization.md) | Whether NEON or the GPU can help (mostly no, and why) — plus the Pi 3 verdict this document got wrong, and what the mistake was |
+| [Backend options](docs/backend-options.md) | What replacing the emulation core would mean — written when a Pi 3 looked unreachable, and marked where that no longer holds |
 
 ## How it works, briefly
 
