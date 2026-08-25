@@ -1,0 +1,83 @@
+mcu: one decode-ladder walk for an aligned word, not two
+
+MCU_Read16 and MCU_Write16 are byte-wise: two full MCU_Read/MCU_Write calls,
+each of which re-derives the page and walks the page-0 range ladder. The H8/500
+family is word-oriented -- the interpreter's operand loads and stores, and the
+stack traffic behind every call and interrupt, come through here -- so the
+ladder was being walked twice for almost every memory operand.
+
+A word access is aligned (address &= ~1u is upstream's), so its two bytes
+cannot straddle any boundary in the decode. For the regions with no side
+effects on read -- rom1, the battery SRAM window at page 0 0x8000..0xdfff,
+which lands in sram on every model, and pages 1..4, which mirror rom2 on every
+model -- one walk answers both bytes. On the write side only the SRAM window is
+side-effect free, so it is the only write arm. Everything else -- device
+registers, the PCM and sub-MCU windows, the RAMCR-gated RAM window, unknown
+addresses -- falls through to the byte-wise path unchanged.
+
+Each fast-path arm is written as the literal composition of the two byte
+accesses it replaces, index arithmetic included, so equivalence does not rest
+on the mask being any particular shape.
+
+Proof: patches/tests/mcu/mcu_word_access_equivalence.cpp drives the patched
+MCU_Read16/MCU_Write16 and upstream's byte-wise composition over every aligned
+address in the 20-bit space, all nine romsets, both RAMCR states and four
+rom2_mask shapes, comparing the value, every scalar in mcu_t, every outward
+call, and -- for writes -- every byte of every memory array at the end of the
+sweep. Its mutants check the test can fail.
+
+--- a/src/backend/mcu.cpp
++++ b/src/backend/mcu.cpp
+@@ -639,6 +639,31 @@
+ uint16_t MCU_Read16(mcu_t& mcu, uint32_t address)
+ {
+     address &= ~1u;
++    // A word access is aligned, so its two bytes cannot straddle any boundary
++    // in MCU_Read's decode, and for the regions with no side effects -- rom1,
++    // the battery SRAM window, and the pages that mirror rom2 on every model
++    // -- one walk of the ladder can answer for both bytes instead of two.
++    // Each arm is the literal composition of the two byte reads it replaces;
++    // patches/tests/mcu/mcu_word_access_equivalence.cpp holds it to that over
++    // the whole address space, every romset and every rom2_mask shape.
++    const uint32_t page = (address >> 16) & 0xfu;
++    const uint32_t lo = address & 0xffffu;
++    if (page == 0)
++    {
++        if (!(lo & 0x8000u))
++            return (uint16_t)((mcu.rom1[lo] << 8) + mcu.rom1[lo + 1]);
++        if (lo < 0xe000u)
++        {
++            const uint32_t off = lo & 0x7fffu;
++            return (uint16_t)((mcu.sram[off] << 8) + mcu.sram[off + 1]);
++        }
++    }
++    else if (page <= 4)
++    {
++        const uint32_t hi = mcu.rom2[(address & 0x3ffffu) & mcu.rom2_mask];
++        const uint32_t lo8 = mcu.rom2[((address + 1) & 0x3ffffu) & mcu.rom2_mask];
++        return (uint16_t)((hi << 8) + lo8);
++    }
+     uint8_t b0, b1;
+     b0 = MCU_Read(mcu, address);
+     b1 = MCU_Read(mcu, address+1);
+@@ -795,6 +820,20 @@
+ void MCU_Write16(mcu_t& mcu, uint32_t address, uint16_t value)
+ {
+     address &= ~1u;
++    // Same shape as MCU_Read16 above. Only the battery SRAM window is free of
++    // side effects on the write side -- everything else latches, dispatches or
++    // diagnoses -- so it is the only arm.
++    if (((address >> 16) & 0xfu) == 0)
++    {
++        const uint32_t lo = address & 0xffffu;
++        if (lo >= 0x8000u && lo < 0xe000u)
++        {
++            const uint32_t off = lo & 0x7fffu;
++            mcu.sram[off] = (uint8_t)(value >> 8);
++            mcu.sram[off + 1] = (uint8_t)(value & 0xff);
++            return;
++        }
++    }
+     MCU_Write(mcu, address, (uint8_t)(value >> 8));
+     MCU_Write(mcu, address + 1, (uint8_t)(value & 0xff));
+ }
