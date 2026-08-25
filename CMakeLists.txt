@@ -99,11 +99,48 @@ endif()
 # -DSC55D_PATCH_CORE=OFF.
 option(SC55D_PATCH_CORE "Apply patches/ to a private copy of the core" ON)
 
+# Upstream's development/decoder2 branch caches decoded instructions and skips
+# MCU_Read for most memory loads. It is unreleased (due to be the default in
+# core 0.7.0) and the submodule is pinned to master, so this is opt-in and needs
+# a core checkout that actually carries the branch. Unvalidated here: no romset
+# was available to render, so treat a decoder2 build as something to benchmark
+# and digest-check, not something to deploy. See patches/README.md.
+option(SC55D_DECODER2 "Build against upstream's unreleased decoder2 instruction decoder" OFF)
+
+if(SC55D_DECODER2 AND NOT IS_DIRECTORY "${NUKED_DIR}/src/backend/decoder2")
+    message(FATAL_ERROR
+        "sc55d: -DSC55D_DECODER2=ON needs a core checkout carrying the decoder2 "
+        "branch, and ${NUKED_DIR} has no src/backend/decoder2.\n"
+        "  git -C vendor/nuked-sc55 fetch origin development/decoder2\n"
+        "  git -C vendor/nuked-sc55 checkout FETCH_HEAD\n"
+        "or point -DNUKED_DIR at a checkout of that branch.")
+endif()
+
 set(CORE_SRC_DIR "${NUKED_DIR}")
 
 if(SC55D_PATCH_CORE)
     file(GLOB SC55D_PATCHES "${CMAKE_CURRENT_SOURCE_DIR}/patches/*.patch")
     list(SORT SC55D_PATCHES)
+
+    if(SC55D_DECODER2)
+        # 0003 fast-paths MCU_ReadCodeAdvance, which decoder2 takes off the hot
+        # path entirely -- upstream calls it invalidated and they are right.
+        # 0006 needs a rebase because decoder2 appends a member to mcu_t.
+        list(FILTER SC55D_PATCHES EXCLUDE REGEX "/0003-mcu-code-fetch-fast-path\\.patch$")
+
+        # Substituted in place, not appended: series order matters, and
+        # patches/decoder2/0006 sorts after patches/0013 on full path.
+        set(_sc55d_series "")
+        foreach(_p IN LISTS SC55D_PATCHES)
+            if(_p MATCHES "/0006-mcu-hot-field-layout\\.patch$")
+                list(APPEND _sc55d_series
+                    "${CMAKE_CURRENT_SOURCE_DIR}/patches/decoder2/0006-mcu-hot-field-layout.patch")
+            else()
+                list(APPEND _sc55d_series "${_p}")
+            endif()
+        endforeach()
+        set(SC55D_PATCHES ${_sc55d_series})
+    endif()
 
     if(SC55D_PATCHES)
         find_program(SC55D_PATCH_EXE NAMES patch)
@@ -115,6 +152,13 @@ if(SC55D_PATCH_CORE)
         set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${SC55D_PATCHES})
 
         set(CORE_SRC_DIR "${CMAKE_BINARY_DIR}/core-patched")
+
+        set(_sc55d_patch_hint "")
+        if(NOT SC55D_DECODER2 AND IS_DIRECTORY "${NUKED_DIR}/src/backend/decoder2")
+            set(_sc55d_patch_hint
+                "This checkout carries the decoder2 branch; that series needs "
+                "-DSC55D_DECODER2=ON.\n")
+        endif()
 
         # Start from a clean copy so re-configuring never double-applies.
         file(REMOVE_RECURSE "${CORE_SRC_DIR}")
@@ -132,6 +176,7 @@ if(SC55D_PATCH_CORE)
             if(NOT patch_result EQUAL 0)
                 message(FATAL_ERROR
                     "sc55d: ${patch_name} does not apply to this core checkout.\n"
+                    "${_sc55d_patch_hint}"
                     "The submodule has probably moved. Rebase the patch, or configure "
                     "with -DSC55D_PATCH_CORE=OFF to build the core unmodified.\n"
                     "${patch_output}")
@@ -194,6 +239,20 @@ if(_nuked_project MATCHES "VERSION ([0-9]+)\\.([0-9]+)\\.([0-9]+)")
 endif()
 set(NUKED_ENABLE_ASIO 0)
 set(NUKED_SOURCE "sc55d")
+
+if(SC55D_DECODER2)
+    # Globbed rather than listed: the branch is unreleased and still moving, and
+    # upstream's own CMakeLists just adds every .cpp in the directory.
+    file(GLOB SC55D_DECODER2_SOURCES "${CORE_SRC_DIR}/src/backend/decoder2/*.cpp")
+    list(SORT SC55D_DECODER2_SOURCES)
+    if(NOT SC55D_DECODER2_SOURCES)
+        message(FATAL_ERROR "sc55d: no sources found in ${CORE_SRC_DIR}/src/backend/decoder2")
+    endif()
+    list(APPEND CORE_SOURCES ${SC55D_DECODER2_SOURCES})
+    set(NUKED_ENABLE_DECODER2 1)
+    list(LENGTH SC55D_DECODER2_SOURCES _sc55d_decoder2_count)
+    message(STATUS "sc55d: decoder2 enabled (${_sc55d_decoder2_count} extra core sources)")
+endif()
 configure_file(${CORE_SRC_DIR}/src/backend/config.h.in backend/config.h @ONLY)
 set(NUKED_CORE_VERSION ${CMAKE_PROJECT_VERSION})
 

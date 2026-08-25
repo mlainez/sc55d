@@ -1,0 +1,158 @@
+mcu: group the per-instruction fields ahead of the memory arrays
+
+mcu_t puts 664 KiB of ROM, RAM, SRAM, NVRAM and card RAM arrays between the
+register file and everything else the interpreter touches every instruction:
+dev_register, the four peripheral pointers, the romset flags, rom2_mask,
+analog_end_time and the operand-decode scratch all sit past a 656 KiB hole.
+Field order is layout only -- mcu_t is never serialised, memcpy'd or aggregate
+initialised anywhere in the tree -- so move the arrays to the end.
+
+On x86-64 this changes nothing (7,556,638,426 -> 7,557,195,495 Ir, +0.007%);
+addressing modes there take a 32-bit displacement.  On AArch64 a byte load with
+a scaled 12-bit immediate reaches 4095 bytes from its base, so with the upstream
+order GCC 13 -O3 -mcpu=cortex-a53 materialises two extra base registers on entry
+to MCU_Step() and has to save and restore x21/x22 to hold them.  Counting the
+instructions actually executed on the mk2 path through MCU_Step():
+
+    upstream order   37
+    this patch       32
+
+The saving is five AArch64 instructions per emulated instruction, and two loads
+additionally fold into ldp pairs.  All the fields above now live in the first
+336 bytes of the struct.
+Rebased for upstream's development/decoder2 branch, which appends an
+InstructionCache member to the end of mcu_t and so collides with this patch's
+last hunk. The only difference from patches/0006 is that the icache member is
+kept with the per-instruction fields, ahead of the bulk arrays, instead of after
+them: it is an 8-byte handle read on every instruction, so leaving it last would
+place the newest hot field on the far side of the 664 KiB hole this patch closes.
+
+--- a/src/backend/mcu.h
++++ b/src/backend/mcu.h
+@@ -232,7 +232,18 @@
+ 
+ void MCU_DefaultSampleCallback(void* userdata, const AudioFrame<int32_t>& frame);
+ 
++// Field order here is deliberate: everything the interpreter touches on every
++// instruction is grouped ahead of the six memory arrays, which together are
++// 664 KiB. Upstream has the arrays in the middle, which pushes dev_register,
++// the peripheral pointers, the romset flags and the operand-decode scratch out
++// past a 656 KiB hole from the register file. That costs nothing on x86-64,
++// whose addressing modes take a 32-bit displacement, but on AArch64 a byte load
++// with a scaled 12-bit immediate reaches only 4095 bytes from its base, so
++// every one of those fields needs its address materialised separately. The
++// reorder is layout-only: mcu_t is never serialised, memcpy'd or aggregate
++// initialised anywhere in the tree.
+ struct mcu_t {
++    // --- CPU state, touched by every instruction ---
+     uint16_t r[8]{};
+     uint16_t pc = 0;
+     uint16_t sr = 0;
+@@ -244,33 +255,15 @@
+     BoundedOrderedBitSet<16> trapa_pending;
+     uint64_t cycles = 0;
+ 
+-    uint8_t rom1[ROM1_SIZE]{};
+-    uint8_t rom2[ROM2_SIZE]{};
+-    uint8_t ram[RAM_SIZE]{};
+-    uint8_t sram[SRAM_SIZE]{};
+-    uint8_t nvram[NVRAM_SIZE]{};
+-    uint8_t cardram[CARDRAM_SIZE]{};
+-
+-    uint8_t dev_register[0x80]{};
+-
+-    uint16_t ad_val[4]{};
+-    uint8_t ad_nibble = 0;
+-    uint8_t sw_pos = 3;
+-    uint8_t io_sd = 0;
+-
++    // --- peripherals clocked from MCU_Step() ---
+     submcu_t* sm = nullptr;
+     pcm_t* pcm = nullptr;
+     mcu_timer_t* timer = nullptr;
+     lcd_t* lcd = nullptr;
+ 
+-    uint32_t uart_write_ptr = 0;
+-    uint32_t uart_read_ptr = 0;
+-    uint8_t uart_buffer[uart_buffer_size]{};
+-
+-    uint8_t uart_rx_byte = 0;
+-    uint64_t uart_rx_delay = 0;
+-    uint64_t uart_tx_delay = 0;
++    uint64_t analog_end_time = 0;
+ 
++    // --- fixed once the romset is known, read on every access ---
+     Romset romset = Romset::MK2;
+ 
+     bool is_mk1 = false; // 0 - SC-55mkII, SC-55ST. 1 - SC-55, CM-300/SCC-1
+@@ -287,6 +280,22 @@
+ 
+     uint32_t rom2_mask = ROM2_SIZE - 1;
+ 
++    // --- operand decode scratch, rewritten by every instruction ---
++    uint32_t operand_type = 0;
++    uint16_t operand_ea = 0;
++    uint8_t operand_ep = 0;
++    MCU_Operand_Size operand_size{};
++    uint8_t operand_reg = 0;
++    uint8_t operand_status = 0;
++    uint16_t operand_data = 0;
++    uint8_t opcode_extended = 0;
++
++    // --- I/O and front panel ---
++    uint16_t ad_val[4]{};
++    uint8_t ad_nibble = 0;
++    uint8_t sw_pos = 3;
++    uint8_t io_sd = 0;
++
+     bool ga_int[8]{};
+     uint8_t ga_int_enable = 0; // mask of ga_int indices
+     uint8_t ga_int_trigger = 0; // index into ga_int
+@@ -298,27 +307,35 @@
+     uint8_t p1_data = 0;
+ 
+     int adf_rd = 0;
+-
+-    uint64_t analog_end_time = 0;
+-
+     int ssr_rd = 0;
+ 
+-    uint32_t operand_type = 0;
+-    uint16_t operand_ea = 0;
+-    uint8_t operand_ep = 0;
+-    MCU_Operand_Size operand_size{};
+-    uint8_t operand_reg = 0;
+-    uint8_t operand_status = 0;
+-    uint16_t operand_data = 0;
+-    uint8_t opcode_extended = 0;
++    uint32_t uart_write_ptr = 0;
++    uint32_t uart_read_ptr = 0;
++    uint8_t uart_rx_byte = 0;
++    uint64_t uart_rx_delay = 0;
++    uint64_t uart_tx_delay = 0;
+ 
+     void* callback_userdata = nullptr;
+     mcu_sample_callback sample_callback = MCU_DefaultSampleCallback;
+ 
+ #if NUKED_ENABLE_DECODER2
+-    // Decoder state
++    // Decoder state. InstructionCache is an 8-byte handle, so it belongs here
++    // with the fields the interpreter touches per instruction rather than
++    // behind the bulk arrays below -- upstream declares it last, which on
++    // AArch64 puts it past the 664 KiB hole this patch exists to close.
+     decoder2::InstructionCache icache;
+ #endif
++
++    uint8_t dev_register[0x80]{};
++
++    // --- bulk memory: 664 KiB, kept out of the way of everything above ---
++    uint8_t rom1[ROM1_SIZE]{};
++    uint8_t rom2[ROM2_SIZE]{};
++    uint8_t ram[RAM_SIZE]{};
++    uint8_t sram[SRAM_SIZE]{};
++    uint8_t nvram[NVRAM_SIZE]{};
++    uint8_t cardram[CARDRAM_SIZE]{};
++    uint8_t uart_buffer[uart_buffer_size]{};
+ };
+ 
+ void MCU_Init(mcu_t& mcu, submcu_t& sm, pcm_t& pcm, mcu_timer_t& timer, lcd_t& lcd);

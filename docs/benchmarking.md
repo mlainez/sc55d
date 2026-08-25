@@ -33,6 +33,10 @@ A one-second warm-up is not enough with real ROMs — the firmware has not boote
 and the run measures silence, which the digest line flags as `(SILENT)`. The
 default is 4 s (`--bench-warmup`).
 
+To benchmark upstream's unreleased decoder2 branch against the patch series —
+which is the open question for a Pi 3 — see
+[patches/README.md § Building it, to benchmark it](../patches/README.md#building-it-to-benchmark-it).
+
 Run it the way the daemon will run: same `--cpu`, same `--model`, same
 privileges. And compare like with like — the ratio moves several-fold with build
 flags, so re-benchmark after changing them.

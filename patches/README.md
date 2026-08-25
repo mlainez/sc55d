@@ -319,6 +319,76 @@ there. It is measurable in retired instructions without a cache profiler, and
 it is the strongest argument for doing the layout work: on the boards this
 project targets, the large structures cost instructions, not just misses.
 
+### Building it, to benchmark it
+
+The submodule stays pinned to master, so decoder2 is opt-in and needs a checkout
+that carries the branch:
+
+```bash
+git -C vendor/nuked-sc55 fetch origin development/decoder2
+git -C vendor/nuked-sc55 checkout FETCH_HEAD
+
+cmake -S . -B build-d2 -DCMAKE_BUILD_TYPE=Release -DSC55D_CPU=cortex-a72 \
+      -DSC55D_DECODER2=ON
+cmake --build build-d2 -j4
+```
+
+`-DSC55D_DECODER2=ON` drops 0003, substitutes `patches/decoder2/0006` for
+`patches/0006`, compiles the branch's 19 decoder sources into sc55d, and sets
+`NUKED_ENABLE_DECODER2=1` in the core's generated `config.h`. Without the flag
+nothing changes, so the default build is unaffected either way.
+
+Checking the submodule out at the branch leaves its pointer dirty in
+`git status` — that is expected, and it should not be committed.
+`git submodule update --checkout` puts it back. `-DNUKED_DIR=<path>` works
+instead, if you would rather keep a separate checkout.
+
+The comparison worth making is four builds on one board and one romset, since
+the interesting quantity is what decoder2 adds *on top of* the series rather
+than against a stock core:
+
+```bash
+                                          # patches   decoder
+./build/sc55d    --roms R --bench --no-realtime   # 13        old
+./build-d2/sc55d --roms R --bench --no-realtime   # 12        new
+#   ... and each again with -DSC55D_PATCH_CORE=OFF for the two baselines
+```
+
+**The four digests must agree.** `--bench` prints an FNV-1a digest of everything
+it renders, and it is the whole validation: upstream intends decoder2 to be
+behaviour-identical, our patches are required to be, and nothing here has
+confirmed either on this branch. A digest marked `(SILENT)` means the run
+produced no audio and the comparison is worthless. Read `worst second`, not the
+average, and if the board is close to the line run the core's 36 mk2
+integration cases as described under [Validation status](#validation-status)
+before trusting a decoder2 build with anything.
+
+### What was and was not checked here
+
+Verified on x86-64, with no romset available:
+
+- the twelve-patch decoder2 series applies in order, exactly as CMake applies
+  it, against `36fb091`;
+- both builds configure and compile clean, and the decoder2 binary runs;
+- the default build is untouched — `patches/decoder2/0006` is unreachable
+  without `-DSC55D_DECODER2=ON`;
+- the rebased 0006 does what it is for. On decoder2's `mcu_t`:
+
+  | | unpatched | rebased 0006 |
+  |---|---|---|
+  | `offsetof(operand_type)` | 664892 | **104** |
+  | `offsetof(icache)` | 664928 | **208** |
+  | `offsetof(rom1)` (bulk memory) | 48 | 344 |
+  | `sizeof(mcu_t)` | 664936 | 664920 |
+
+  Every per-instruction field lands inside the 16380-byte reach of an AArch64
+  scaled 12-bit immediate, `icache` included.
+
+**Not verified: any audio at all from a decoder2 build.** There are no ROMs on
+the machine this was prepared on, so nothing here has rendered a sample through
+the new decoder. That is what the digest comparison above is for, and it has to
+happen before a decoder2 build is used for anything but benchmarking.
+
 ### What this does not settle
 
 Whether decoder2 delivers enough to run an mk2 romset on a Pi 3 is unmeasured
