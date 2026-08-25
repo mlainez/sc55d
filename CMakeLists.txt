@@ -100,12 +100,18 @@ endif()
 option(SC55D_PATCH_CORE "Apply patches/ to a private copy of the core" ON)
 
 # Upstream's development/decoder2 branch caches decoded instructions and skips
-# MCU_Read for most memory loads. It is unreleased (due to be the default in
-# core 0.7.0) and the submodule is pinned to master, so this is opt-in and needs
-# a core checkout that actually carries the branch. Unvalidated here: no romset
-# was available to render, so treat a decoder2 build as something to benchmark
-# and digest-check, not something to deploy. See patches/README.md.
-option(SC55D_DECODER2 "Build against upstream's unreleased decoder2 instruction decoder" OFF)
+# MCU_Read for most memory loads. It is due to be the default in core 0.7.0,
+# the submodule is pinned to it, and it is validated here: bit-identical audio
+# on a real mk2 set, all 37 of upstream's mk2-family integration cases, and it
+# is the difference between an SC-55mkII holding realtime on a Pi 3 at stock
+# clock and not. The default follows the core checkout: on when the sources
+# carry the new decoder, off against a master checkout. See patches/README.md.
+if(IS_DIRECTORY "${NUKED_DIR}/src/backend/decoder2")
+    set(_sc55d_decoder2_default ON)
+else()
+    set(_sc55d_decoder2_default OFF)
+endif()
+option(SC55D_DECODER2 "Use the core's decoder2 instruction decoder" ${_sc55d_decoder2_default})
 
 if(SC55D_DECODER2 AND NOT IS_DIRECTORY "${NUKED_DIR}/src/backend/decoder2")
     message(FATAL_ERROR
@@ -125,9 +131,13 @@ if(SC55D_PATCH_CORE)
     if(SC55D_DECODER2)
         # 0003 fast-paths MCU_ReadCodeAdvance, which decoder2 takes off the hot
         # path entirely -- upstream calls it invalidated and they are right.
-        # 0006 needs a rebase because decoder2 appends a member to mcu_t.
         list(FILTER SC55D_PATCHES EXCLUDE REGEX "/0003-mcu-code-fetch-fast-path\\.patch$")
+    endif()
 
+    # 0006 rewrites the tail of mcu_t, and the decoder2 sources add a member
+    # there -- textually, whether or not the new decoder is compiled -- so the
+    # 0006 variant follows the checkout, not the flag.
+    if(IS_DIRECTORY "${NUKED_DIR}/src/backend/decoder2")
         # Substituted in place, not appended: series order matters, and
         # patches/decoder2/0006 sorts after patches/0013 on full path.
         set(_sc55d_series "")
