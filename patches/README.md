@@ -132,6 +132,7 @@ register.
 | 0013 | `submcu-collapse-the-sub-MCU-timer-loop` | `SM_UpdateTimer` runs exactly three iterations per call, mostly decrementing a prescaler. **−2.70%** on real firmware, which programs a reload of 124 against a break-even of 3. |
 | 0014 | `submcu-skip-idle-interrupt-scan` | 0005's trick on the sub-MCU: `SM_HandleInterrupt`'s nine-arm ladder answered from two bytes when nothing is pending. Measured with real ROMs: the function was **5.9% of all instructions**, and **59.7% of its 2.6M calls per audio-second** exit through the new test. |
 | 0015 | `mcu-word-access-fast-path` | One decode-ladder walk for an aligned word instead of two, for the side-effect-free regions only. Small on its own (`MCU_Read` is 2.2% post-decoder2); measured together with 0014 on a Pi 3: **+6.3% worst-second**. |
+| 0016 | `submcu-fast-forward-idle-loop` | The sub-MCU spends 98.2% of its instructions in a twenty-instruction idle loop that touches only zero-page RAM; once a pass is observed to reproduce the previous one exactly, its clock is advanced across whole passes to the next timer or UART event and rewound exactly if the main MCU touches it. **+19.4% worst-second on a Pi 3, +18.9% on a Pi 4**, digest unchanged; the mkII holds realtime on a Pi 3 at stock clock without PGO. |
 
 0008–0012 together are **−21.0% of PCM per tick** with all 32 voices on, and
 between −19.7% and −22.7% across every activity level — they do not depend on
@@ -173,6 +174,20 @@ g++ -O2 -std=c++23 -o /tmp/ut patches/tests/unscramble_equivalence.cpp && /tmp/u
   nine romsets, both RAMCR states and five rom2_mask shapes — 15.3M accesses;
   writes drive lockstep machines and every writable array is compared at the
   end of each pass. 4 mutants.
+- **sub-MCU fast-forward** — the real `submcu.cpp` compiled twice, upstream
+  renamed, both driven by the same simulated main MCU (MCU_Step's cadence,
+  shared-RAM and IPC reads and writes, UART bytes and port changes at random
+  moments, the real timer) over the real sub-MCU firmware (16M steps, 2M
+  synchronisation points, 500k reads) and three synthetic programs assembled
+  from the core's opcode table — a pure idle loop, the same loop storing to
+  shared RAM (must never fast-forward), a counting loop (never stationary).
+  Every observable and, at every synchronisation point, the full state
+  including clock and timer compared. 5 mutants, each caught by the program
+  built to catch it. Two harness mistakes worth recording: the upstream TU
+  must be compiled from a neutral directory or it silently picks up
+  upstream's `mcu_t` layout; and external accesses must be issued *before*
+  the step's cycle increment, as MCU_Step does — both produced convincing
+  false failures before they were found.
 - **pcm** — `pcm.cpp` built twice into a driver that digests the **entire**
   mutable PCM state each tick (ram1, ram2, all 16 KiB of eram, every scalar),
   every sample posted and every interrupt raised. 44 cases over 10 modes,
@@ -230,7 +245,16 @@ with a real `mk2-v1.01` set, decoder2 enabled, PGO trained on the bench plus
 decoder2 + 12 patches                   0.909-0.911x   6154f44b25c3b441
  + 0014 + 0015                          0.963-0.968x   6154f44b25c3b441
  + PGO (bench + real music)             1.021x  x3     6154f44b25c3b441   holds realtime
+ + 0016 (2026-08-26, no PGO)            1.158-1.171x   6154f44b25c3b441   holds realtime
 ```
+
+With 0016 the mkII no longer needs PGO to hold realtime on a Pi 3; PGO is
+still worth its ~5% on top. On a Pi 4 at 1500 MHz the same patch takes the
+mk2 bench from 2.041-2.050x to 2.425-2.437x. On both boards the mk1 — which
+has no sub-MCU, so none of the new code runs — reads 0.7-1% slower with the
+patch applied (Pi 3: 1.619-1.620x → 1.602-1.612x); the likeliest cause is
+code-layout movement on the in-order core, it is within the mk1's very large
+margin, and it is recorded here as an open item rather than explained away.
 
 The playback test that motivated all of it: 17.mid, a 297 s track whose dense
 passages defeated every earlier build (392 xruns on the shipping binary,
@@ -240,6 +264,31 @@ configuration (640-frame periods, render-ahead 7, SCHED_FIFO, jack):
 ```
 0 starves, 1 xrun, ring never below 3 of 7 periods
 ```
+
+## Where the sub-MCU's time went, and patch 0016
+
+Instrumenting `SM_Update` over all of 17.mid with real mk2 ROMs (after 0014):
+766,662,290 sub-MCU iterations, asleep for 187,382 of them (0.02%);
+766,474,908 instructions executed at 273 distinct addresses, of which
+**98.2% are one loop of twenty instructions**, each executed 37,639,226
+times — a single deterministic path, 127,000 passes per second of audio,
+interrupted 557,764 times (~1,880/s) by the timer and UART handlers that
+make up the remaining 1.8%. The loop's memory traffic, from the emulator's
+access log: reads of zero-page bytes 01 (seven per pass), 00 and 02 (one
+each); writes of 00, 01, 02, 03 (one each); nothing else — no device
+register, no shared RAM, no port. It is invisible to the main MCU.
+
+That is what makes 0016 exact rather than approximate: a pure loop that
+reproduces its own state is time-translation-invariant between events, so
+the state at any position of any later pass is the recorded state at that
+position, and advancing the clock across passes — then rewinding it on an
+external access — changes nothing observable. The bounds are the next timer
+fire (in closed form from the counter, prescaler and reload), a pending UART
+byte's delivery, a pending interrupt request, and a cap. Retired instructions
+on x86 fall 9.0% per audio-second (callgrind, real ROMs); wall-clock gains
+are much larger — 10.4x → 13.7x on the x86 host, +19% on the boards —
+because what the skipped iterations mostly cost was branchy, dependent-load
+work that an instruction count undervalues.
 
 ## The audit: every patch measured alone
 
