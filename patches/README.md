@@ -8,586 +8,164 @@
 > redistributable, but not saleable and not for commercial use, and the notice
 > must travel with them.
 
-Performance patches for the emulation core. They are applied at build time to a
+Four performance patches for the Nuked-SC55 core, applied at build time to a
 copy of the core under the build tree — **the `vendor/nuked-sc55` submodule is
-never modified**, so it stays a pristine checkout and everything we change is
-reviewable as a patch here.
+never modified**. They exist for one purpose, and were kept to the minimum that
+serves it: **running an SC-55mkII in realtime on a Raspberry Pi 3 at its stock
+clock, with headroom.** Everything here is bit-exact — the audio is identical
+to the unpatched core, byte for byte — and each patch has a differential proof
+with deliberate mutants. Twelve further patches that were also bit-exact but
+did not move the target number are in [`attic/`](attic/README.md), with the
+measurements that retired them.
+
+## For upstream: stock decoder2 versus this series
+
+All figures below are the core's `development/decoder2` branch at `36fb091`,
+unpatched, against the same sources with these four patches. Worst-second
+realtime ratio from `sc55d --bench` (30 s of a dense sixteen-part sequence,
+the lowest one-second ratio of the run; 1.0x is the line), medians of three
+interleaved runs, digest `6154f44b25c3b441` (mk2) / `c090f4a7b860f585` (mk1)
+identical on every run:
+
+| | stock decoder2 | + this series | |
+|---|---|---|---|
+| **Raspberry Pi 3B, 1200 MHz, mk2** | 0.500x | **1.236x** | **2.47x** faster |
+| Raspberry Pi 3B, 1200 MHz, mk1 | 0.821x | 1.603x | 1.95x |
+| Raspberry Pi 4, 1500 MHz, mk2 | 1.065x | **2.676x** | 2.51x |
+| Raspberry Pi 4, 1500 MHz, mk1 | 1.750x | 3.415x | 1.95x |
+| x86-64 Xeon 2.8 GHz, mk2 | — | 13.6x | — |
+| x86-64, retired instructions per audio-second, mk2 | 3.198 G | 1.396 G | −56.4% |
+
+The practical statement: an SC-55mkII on a Pi 3 goes from half speed to
+realtime with a quarter of headroom; `17.mid`, the densest track in the test
+corpus, plays through the appliance's production configuration (640-frame
+periods, 7 periods of render-ahead, SCHED_FIFO) with **0 starves** — the ring
+never below 3 of 7 periods — on both boards.
+
+### Which patches matter on ARM but not on x86
+
+This is the point the series is built around, so it is stated plainly. An
+in-order Cortex-A53 does not hide instruction-count-neutral costs the way an
+out-of-order x86 does, and two of the four patches are worth nothing — or
+next to nothing — in retired instructions while being decisive on the board:
+
+| patch | x86 retired instructions | Pi 3 worst-second | what it is really about |
+|---|---|---|---|
+| 0001 timer closed form | −80.9% of the series' total | +57% | algorithmic: everywhere |
+| 0002 **ARM hot-field layout** | **0.00%** | **+4.7%** | AArch64 addressing-mode reach; x86 has 32-bit displacements and never had the problem |
+| 0003 PCM per-tick work | −11.2% | +10.6% | algorithmic, with one branch-predictor-shaped part (the reverb gating: +0.4% instructions, +0.5% on the board) |
+| 0004 sub-MCU idle fast-forward | −9.0% | **+26%** on top of 0001, then +8% more once the timer advance is O(1) | skipped work was branchy, dependent-load work an instruction count undervalues; the closed-form timer advance is exactly zero on x86 wall-clock and worth 8% on the A53 |
+
+(Board percentages are the step each patch adds in the ladder below, on the
+Pi 3, mk2.)
+
+## The ladder: what each patch adds, on the target
+
+Pi 3B, stock 1200 MHz, mk2, worst-second, medians of three interleaved runs,
+every run at the reference digest:
+
+```
+stock decoder2 (36fb091), unpatched            0.500x
++ 0001  mcu_timer closed-form advancement      0.784x   (+57%)
++ 0004  sub-MCU idle-loop fast-forward         0.986x   (+26%)
++ 0003  PCM per-tick work                      1.091x   (+11%)
++ 0002  ARM hot-field layout                   1.142x   (+4.7%)
+        ... with 0004's O(1) timer advance     1.236x   (+8.2%)   <- the series as shipped
+        (the former sixteen-patch series       1.170x)
+```
+
+On the Pi 4 the same comparison reads 2.434x for the former sixteen and
+2.676x for these four. One honest footnote: on the mk1, which has no sub-MCU
+and runs none of 0004, the four-patch series reads about 1% below the
+sixteen-patch one on both boards (Pi 3 1.603x vs 1.608x; Pi 4 3.415x vs
+3.453x) — most plausibly code-layout movement on the in-order core, inside
+the mk1's very large margin, and recorded rather than explained away.
+
+The last two lines are the reason the series is four patches and not
+sixteen: with the sub-MCU's idle loop skipped, the constant-time timer
+advance that the skip hands thousands of ticks to is worth more than the
+twelve patches that were dropped, combined.
+
+## The patches
+
+| # | patch | what it does | proof |
+|---|---|---|---|
+| 0001 | `mcu_timer-closed-form-advancement` | The main MCU's timer block was stepped cycle by cycle; the counters are deferred and the next event scheduled in closed form. `TIMER_Clock` 2295 M → 38 M instructions on the 32-slot workload. | `tests/timer_closed_form/` — the real `mcu_timer.cpp` built twice in one program, upstream in namespace `ref` and patched in `neu`, compared after each of 9.6 M operations (observational equivalence: the patch deliberately leaves counters stale and syncs on demand); 9 mutants. |
+| 0002 | `arm-hot-field-layout` | Reorders `mcu_t` and `pcm_t` so everything touched per instruction and per tick sits inside the AArch64 immediate's reach ahead of 664 KiB / 15 MiB of arrays. Layout only; neither struct is serialised, memcpy'd or aggregate-initialised. | Layout has no behaviour to prove; the digest and the 37 integration cases are the check. Measured: −5 instructions per emulated instruction on AArch64, 0 on x86. |
+| 0003 | `pcm-per-tick-work` | Five hoists in the PCM inner loop: per-tick invariants of `calc_tv` computed once instead of 97 times, address-step algebra folded, `calc_tv` templated on the envelope index, reverb injection gated (6 of 32 slots), the dead fourth address step and its wave-ROM read skipped. −21% of PCM per tick at any activity level. | `tests/pcm/` — `pcm.cpp` built twice into a driver that digests the entire mutable PCM state each tick over 44 cases in 10 modes, two of them wide-pitch modes added so the fourth-step branch is exercised; the runner refuses to run if the patch fails to apply or the "patched" source is identical to the pristine one. |
+| 0004 | `submcu-fast-forward-idle-loop` | The sub-MCU's idle loop — 98.2% of its instructions, touching only zero-page RAM — is detected as stationary and its clock advanced across whole passes to the next timer, UART or interrupt event, rewound exactly on any external access; the timer is advanced in constant time (closed form over prescaler, counter and reloads). | `tests/submcu/` — the real `submcu.cpp` built twice, upstream renamed, both driven by the same simulated main MCU over the real firmware and three synthetic programs; 5 mutants. The timer advance separately against upstream's tick loop over 27 M states; 3 mutants. |
+
+Proofs are run with:
 
 ```bash
-cmake -S . -B build -DSC55D_PATCH_CORE=ON
-```
-
-They are **on by default**, having been validated against real audio — see
-below for exactly which romsets that covers.
-
-## Validation status
-
-**The patched core passes all of upstream's own mk2 integration cases** — 36
-on master, and all **37** in the decoder2 branch's extended list, the latter
-re-run with 0014 and 0015 in the series.
-
-That is the strongest check available, and it has now been run. `test/integration/`
-in the core's own tree carries 72 real MIDI files and, for each, the **expected
-SHA-256 of the rendered audio** — an absolute reference published by upstream,
-not a comparison against ourselves. 36 of them are for the SC-55mk2 family (35
-`mk2-v1.01` plus one `mk2`), which is exactly the romset available here.
-
-With a real `mk2-v1.01` ROM set, both with and without `patches/`:
-
-```
-                       36 mk2 cases from upstream's own test list
-
-with patches/          PASS 36   FAIL 0
-unpatched (control)    PASS 36   FAIL 0
-```
-
-Thirty-six independent SHA-256 matches against hashes we did not choose. This
-is what makes the patch series trustworthy in a way that self-comparison never
-could: a digest that agrees with itself proves only that two builds of ours
-agree, whereas these agree with the reference.
-
-The unpatched control is strictly speaking redundant — thirty-six matches
-against an absolute reference cannot happen by accident, so the patched run
-already rules out a broken harness — but it costs nothing but time and it
-closes the question completely.
-
-Reproducing it needs the core's `nuked-sc55-render` target and your own ROMs:
-
-```bash
-cmake -S vendor/nuked-sc55 -B build-render -DCMAKE_BUILD_TYPE=Release
-cmake --build build-render --target nuked-sc55-render
-# then drive test/integration/CMakeLists.txt's (romset, file, sha256) triples
-# through it: --stdout <mid> --rom-directory <dir> --romset <set> --reset gm
-# and compare the SHA-256 of stdout against the triple's third field.
-```
-
-Note their renderer needs RtMidi present to configure, even though it does not
-use it. `scripts/validate-patches.sh` does *not* do any of this — treat it as
-the quick check, and this as the real one. The other 36 cases (`mk1-v1.21` and
-`jv880-v1.0.1`) remain unrun for want of those ROM sets.
-
-
-**Validated: the SC-55mk2 family.** With a real `mk2-v1.01` ROM set, the
-patched and unpatched cores render **bit-identical audio over 30 seconds** of
-the benchmark's sixteen-part stress sequence — digest `6154f44b25c3b441` for
-`mk2` and `8e12918eec7012a4` for `sc155mk2`. The aarch64 build, cross-compiled
-for `-mcpu=cortex-a53` and run under qemu, produces a digest identical to
-x86-64 on the same workload.
-
-**Not validated: `st`, `mk1`, `cm300`, `jv880`, `scb55`, `rlp3237`, `sc155`.**
-No ROMs for them were available. Treat the JV-880 as the one to actually worry
-about: the core carries commit `8d6f67a`, *"mcu_timer: fix invalid
-optimization"*, which undoes an earlier lookup-table change in the very same
-timer function that silently altered **JV-880 output specifically** and went
-unnoticed until someone tried to write integration tests for it. A timer that
-is subtly wrong does not crash; it shifts interrupt timing, and you find out
-much later. If you run one of these romsets, run the validation below first, or
-build with `-DSC55D_PATCH_CORE=OFF`.
-
-## Validating a patch
-
-`--bench` prints an FNV-1a digest of everything it renders. Two builds that
-produce the same audio print the same digest:
-
-```bash
-cmake -S . -B build-off -DCMAKE_BUILD_TYPE=Release -DSC55D_PATCH_CORE=OFF
-cmake -S . -B build-on  -DCMAKE_BUILD_TYPE=Release -DSC55D_PATCH_CORE=ON
-cmake --build build-off -j4 && cmake --build build-on -j4
-
-for m in mk2 st mk1 cm300 jv880 scb55; do
-  echo "== $m"
-  ./build-off/sc55d --roms /path/to/roms --model $m --bench --bench-seconds 30 | grep digest
-  ./build-on/sc55d  --roms /path/to/roms --model $m --bench --bench-seconds 30 | grep digest
-done
-```
-
-The digests must match for every romset. If the digest is marked `(SILENT)` the
-run produced no audio and the comparison is worthless — that happens with
-placeholder ROM files, and it is why these patches are still unvalidated.
-
-The core's own integration tests are a stronger check again, and need real ROMs
-too.
-
-## Patches
-
-Applied in order. Together they take the 32-slot benchmark from **7,864M to
-4,320M retired instructions, −45.1%** — and that *understates* them, because
-with placeholder ROMs no voice is ever keyed on, so the PCM patches barely
-register.
-
-| # | Patch | Effect |
-|---|---|---|
-| 0001 | `mcu_timer-closed-form-advancement` | Defers the counters, schedules the next event in closed form. `TIMER_Clock` **2295M → 38M**. |
-| 0002 | `rom_io-table-driven-unscramble` | Two fixed bit permutations into 8.25 KiB of tables. **5.1x faster startup**. |
-| 0003 | `mcu-code-fetch-fast-path` | ROM cases answered in the header. −0.36%, **better on real ROMs**. **Superseded by upstream's decoder2** — see below. |
-| 0004 | `mcu_step-hoist-fixed-work` | `has_submcu` decided once; ADCSR tested at the call site. **+1.39% audited on real ROMs** — bigger than the old placeholder figure. |
-| 0005 | `mcu_interrupt-skip-fully-masked-scan` | Early return when the mask is 7. The old −2.64% was a placeholder artefact; **audited on real ROMs at +0.17%** — small, real, and the feared worst-case loss did not materialize. |
-| 0006 | `mcu-hot-field-layout` | Per-instruction fields into the first 336 bytes of `mcu_t`. **−5 instructions per emulated instruction on AArch64**; ~0 on x86. |
-| 0007 | `pcm-hot-field-layout` | `enable_oversampling` sat at offset 15,763,532, past 15 MB of wave ROM, alone in a cache line, read once per sample. |
-| 0008 | `pcm-hoist-calc-tv-per-tick-invariants` | Per-tick tap table + 256-byte type table instead of 97 recomputations per tick. |
-| 0009 | `pcm-fold-address-step-boolean-algebra` | The address step is `0/−1/+1` with a per-slot sign; `reg_slots` hoisted. |
-| 0010 | `pcm-template-calc-tv-on-the-envelope-index` | `e` is a literal at all four sites; `e==2` drops its dead half. |
-| 0011 | `pcm-gate-reverb-injection-switches` | Only 6 of 32 slots inject. Two indirect jumps per slot become one predictable test — **worth more than its instruction count on an in-order A53**. |
-| 0012 | `pcm-skip-dead-fourth-address-step` | Below the `sub_phase_of` threshold the tail *and one of five wave ROM reads* are dead. |
-| 0013 | `submcu-collapse-the-sub-MCU-timer-loop` | `SM_UpdateTimer` runs exactly three iterations per call, mostly decrementing a prescaler. **−2.70%** on real firmware, which programs a reload of 124 against a break-even of 3. |
-| 0014 | `submcu-skip-idle-interrupt-scan` | 0005's trick on the sub-MCU: `SM_HandleInterrupt`'s nine-arm ladder answered from two bytes when nothing is pending. Measured with real ROMs: the function was **5.9% of all instructions**, and **59.7% of its 2.6M calls per audio-second** exit through the new test. |
-| 0015 | `mcu-word-access-fast-path` | One decode-ladder walk for an aligned word instead of two, for the side-effect-free regions only. Small on its own (`MCU_Read` is 2.2% post-decoder2); measured together with 0014 on a Pi 3: **+6.3% worst-second**. |
-| 0016 | `submcu-fast-forward-idle-loop` | The sub-MCU spends 98.2% of its instructions in a twenty-instruction idle loop that touches only zero-page RAM; once a pass is observed to reproduce the previous one exactly, its clock is advanced across whole passes to the next timer or UART event and rewound exactly if the main MCU touches it. **+19.4% worst-second on a Pi 3, +18.9% on a Pi 4**, digest unchanged; the mkII holds realtime on a Pi 3 at stock clock without PGO. |
-
-0008–0012 together are **−21.0% of PCM per tick** with all 32 voices on, and
-between −19.7% and −22.7% across every activity level — they do not depend on
-how busy the synth is, which is why they are trusted despite the benchmark
-being idle.
-
-**Two numbers not to budget for.** 0005's −2.64% is an artefact: the
-placeholder firmware never lowers `sr` from 0x700, so the guard fires on every
-instruction where real firmware would lower the mask early. The guard is one
-instruction, so its worst case is a ~0.08% loss. And the whole-program figure
-above is measured on an idle synth.
-
-### Proofs
-
-Every patch has a ROM-free test:
-
-```bash
-g++ -O2 -std=c++23 -o /tmp/ut patches/tests/unscramble_equivalence.cpp && /tmp/ut
 ./patches/tests/timer_closed_form/run.sh
-./patches/tests/mcu/run.sh
 ./patches/tests/pcm/run.sh
+./patches/tests/submcu/run.sh <build>/core-patched <pristine core checkout> <build>
+#   SM_ROM=<path to mk2 sub-MCU ROM> adds the real firmware to the sub-MCU run
 ```
 
-- **unscramble** — all 256 data bytes, all 8388608 addresses.
-- **timer** — the real `mcu_timer.cpp` built twice in one program, upstream in
-  namespace `ref` and patched in `neu`, compared after each of 9.6M operations.
-  Field comparison would be wrong: the patch deliberately leaves counters stale
-  and syncs on demand, so the claim is *observational* equivalence.
-- **mcu** — the fetch fast path against the **real `MCU_Read`** over
-  188,743,680 `(cp, pc)` × romset × `rom2_mask` combinations, comparing the
-  return value, the log of outward calls *and* every scalar in `mcu_t`, so
-  short-circuiting an address that latches the button matrix would be caught.
-  Plus `mcu_interrupt.cpp` compiled twice over 7,700,480 machine states.
-- **sm scan** — `submcu.cpp` built twice into one program, upstream renamed
-  `Ref_*`, driven over the guard's entire firing domain exhaustively plus 4M
-  unconstrained random states — 5.0M states, full-struct compare, 3 mutants.
-- **word access** — the patched `MCU_Read16`/`MCU_Write16` against upstream's
-  byte-wise composition over every aligned address in the 20-bit space, all
-  nine romsets, both RAMCR states and five rom2_mask shapes — 15.3M accesses;
-  writes drive lockstep machines and every writable array is compared at the
-  end of each pass. 4 mutants.
-- **sub-MCU fast-forward** — the real `submcu.cpp` compiled twice, upstream
-  renamed, both driven by the same simulated main MCU (MCU_Step's cadence,
-  shared-RAM and IPC reads and writes, UART bytes and port changes at random
-  moments, the real timer) over the real sub-MCU firmware (16M steps, 2M
-  synchronisation points, 500k reads) and three synthetic programs assembled
-  from the core's opcode table — a pure idle loop, the same loop storing to
-  shared RAM (must never fast-forward), a counting loop (never stationary).
-  Every observable and, at every synchronisation point, the full state
-  including clock and timer compared. 5 mutants, each caught by the program
-  built to catch it. Two harness mistakes worth recording: the upstream TU
-  must be compiled from a neutral directory or it silently picks up
-  upstream's `mcu_t` layout; and external accesses must be issued *before*
-  the step's cycle increment, as MCU_Step does — both produced convincing
-  false failures before they were found.
-- **pcm** — `pcm.cpp` built twice into a driver that digests the **entire**
-  mutable PCM state each tick (ram1, ram2, all 16 KiB of eram, every scalar),
-  every sample posted and every interrupt raised. 44 cases over 10 modes,
-  including two wide-pitch modes added specifically because the stock ones only
-  drive `sub_phase_of` to 0..1 and would have left 0012's branch untested.
-
-All four suites are known to be capable of failing — 9 mutants for the timer,
-7 deliberate mistakes for the MCU series, 4 for PCM, 7 for the sub-MCU
-candidate, all detected. The PCM runner additionally refuses to run if a patch
-fails to apply or if the "patched" source turns out identical to the pristine
-one, because an early version of it silently compared pristine against
-pristine and passed.
-
-### The strongest evidence available without ROMs
-
-Call counts over 6,388,732 emulated instructions are **identical** between
-unpatched and fully patched: `PCM_ReadROM` 14,868,480, `Diag_Printf`
-11,612,931, `SM_Read` 7,993,725, and `PCM_Update`, `TIMER_Clock`, `SM_Update`,
-`MCU_Interrupt_Handle`, `MCU_Operand_Nop`, `calc_tv` all to the call. Only the
-two intended differences appear. The emulated machine follows the same
-trajectory. The PCM patches were additionally cross-compiled for
-`-mcpu=cortex-a53` and run under qemu, producing output identical to x86-64
-across all 10 modes.
-
-### Two mistakes worth not repeating
-
-Both were caught by measuring rather than reasoning, and both are the reason
-this directory has tests in it.
-
-**Wall-clock is the wrong metric for a Pi.** The first draft of 0001 computed
-the skip distance per iteration. On x86-64 it was ~10% faster — but it retired
-*more* instructions than the unpatched core (2527M vs 2295M), because
-out-of-order execution hid the extra arithmetic while the removed iterations
-were branchy. On an in-order Cortex-A53 that would very likely have been a
-regression. Hoisting the computation out of the loop, which is valid because
-every divider period is a power of two and the smallest divides all the others,
-made it faster on both metrics. **Check retired instructions, not just seconds.**
-
-**Skipping work is not the same as skipping time.** The same draft advanced
-`timer.cycles` to the next divider edge even when that overshot the point the
-original loop would have stopped at. The cycles skipped are only uneventful
-under the divider settings in force at that moment; `timer.cycles` persists
-across calls, so if the MCU then programmed a finer divider, cycles that were
-run past would have become live ones. The fix is to clamp to the original exit
-point.
-
-## Measured on the target: mk2 on a Pi 3 at stock clock
-
-The series' bottom line, measured 2026-08-25 on a Pi 3B at its stock 1200 MHz
-with a real `mk2-v1.01` set, decoder2 enabled, PGO trained on the bench plus
-17.mid through the instrumented daemon on the board itself:
-
-```
-                                        worst second   digest
-decoder2 + 12 patches                   0.909-0.911x   6154f44b25c3b441
- + 0014 + 0015                          0.963-0.968x   6154f44b25c3b441
- + PGO (bench + real music)             1.021x  x3     6154f44b25c3b441   holds realtime
- + 0016 (2026-08-26, no PGO)            1.158-1.171x   6154f44b25c3b441   holds realtime
-```
-
-With 0016 the mkII no longer needs PGO to hold realtime on a Pi 3; PGO is
-still worth its ~5% on top. On a Pi 4 at 1500 MHz the same patch takes the
-mk2 bench from 2.041-2.050x to 2.425-2.437x. On both boards the mk1 — which
-has no sub-MCU, so none of the new code runs — reads 0.7-1% slower with the
-patch applied (Pi 3: 1.619-1.620x → 1.602-1.612x); the likeliest cause is
-code-layout movement on the in-order core, it is within the mk1's very large
-margin, and it is recorded here as an open item rather than explained away.
-
-The playback test that motivated all of it: 17.mid, a 297 s track whose dense
-passages defeated every earlier build (392 xruns on the shipping binary,
-25,243 starves on the previous best), played through the production
-configuration (640-frame periods, render-ahead 7, SCHED_FIFO, jack):
-
-```
-0 starves, 1 xrun, ring never below 3 of 7 periods
-```
-
-## Where the sub-MCU's time went, and patch 0016
-
-Instrumenting `SM_Update` over all of 17.mid with real mk2 ROMs (after 0014):
-766,662,290 sub-MCU iterations, asleep for 187,382 of them (0.02%);
-766,474,908 instructions executed at 273 distinct addresses, of which
-**98.2% are one loop of twenty instructions**, each executed 37,639,226
-times — a single deterministic path, 127,000 passes per second of audio,
-interrupted 557,764 times (~1,880/s) by the timer and UART handlers that
-make up the remaining 1.8%. The loop's memory traffic, from the emulator's
-access log: reads of zero-page bytes 01 (seven per pass), 00 and 02 (one
-each); writes of 00, 01, 02, 03 (one each); nothing else — no device
-register, no shared RAM, no port. It is invisible to the main MCU.
-
-That is what makes 0016 exact rather than approximate: a pure loop that
-reproduces its own state is time-translation-invariant between events, so
-the state at any position of any later pass is the recorded state at that
-position, and advancing the clock across passes — then rewinding it on an
-external access — changes nothing observable. The bounds are the next timer
-fire (in closed form from the counter, prescaler and reload), a pending UART
-byte's delivery, a pending interrupt request, and a cap. Retired instructions
-on x86 fall 9.0% per audio-second (callgrind, real ROMs); wall-clock gains
-are much larger — 10.4x → 13.7x on the x86 host, +19% on the boards —
-because what the skipped iterations mostly cost was branchy, dependent-load
-work that an instruction count undervalues.
-
-## The audit: every patch measured alone
-
-Before approaching upstream with any of this, every patch in the decoder2
-series was measured in isolation (2026-08-26), on two axes: retired
-instructions per audio-second on x86-64 with real mk2 ROMs (leave-one-out
-builds under callgrind, differential between two bench lengths so fixed costs
-cancel), and, for the patches whose value is claimed to be specific to an
-in-order Cortex-A53, worst-second wall-clock on the Pi 3B at stock 1200 MHz
-(fresh cross-builds, interleaved rotations, pre-declared 0.006 noise floor).
-Every one of the 17 x86 builds and all 32 board runs — including a fully
-unpatched control — rendered the reference digest `6154f44b25c3b441`.
-
-**The verdict is that no patch is removable.** What removing each one costs:
-
-| patch | x86, of full-series Ir/s | Pi 3, worst-second |
-|---|---|---|
-| 0001 timer closed-form | **+80.86%** | — |
-| 0002 unscramble tables | steady-state zero by design; **0.62 G instructions at boot** | — |
-| 0004 mcu_step hoist | +1.39% | — |
-| 0005 interrupt mask guard | +0.17% | — |
-| 0006 mcu hot-field layout | exactly zero | **−2.7%** |
-| 0007 pcm hot-field layout | exactly zero | **−0.46%** |
-| 0008 calc_tv invariants¹ | +3.08% | — |
-| 0009 address-step algebra¹ | +1.46% | — |
-| 0010 calc_tv template | +2.78% | — |
-| 0011 reverb-injection gate | +0.36% | **−0.51%** |
-| 0012 dead fourth step | +3.51% | — |
-| 0013 SM timer collapse | +2.30% | — |
-| 0014 SM scan gate | **+5.49%** | — |
-| 0015 word fast path | +0.92% | — |
-
-¹ 0008 and 0009 cannot be removed independently — the later PCM patches need
-their context, so both leave-one-out configures fail. Their figures are
-in-order marginals from prefix builds; the five PCM patches' marginals sum to
-11.20% against a collectively measured 11.22%, so nothing hides in the gap.
-
-Three cross-checks make the numbers defensible one by one:
-
-- **Additivity, x86**: the per-patch contributions sum to 102.32% against a
-  directly measured full-vs-unpatched gap of 102.35% (the whole series takes
-  3,198 M down to 1,581 M instructions per audio-second on real ROMs, −50.6%).
-- **Additivity, board**: 0006 + 0007 + 0011 individually sum to 3.67% against
-  a measured remove-all-three aggregate of 3.66%.
-- **Metric floor**: repeated callgrind runs of one binary differ by 30
-  instructions in 13.2 G, so even 0005's +0.17% is orders of magnitude above
-  noise; the board's floor is ±0.006 worst-second and both sub-1% board
-  deltas were resolved by doubling the rotations.
-
-The audit also settles the two historical doubts this file used to carry:
-0004's placeholder-ROM figure understated it, and 0005 — whose old gain was
-an artefact and whose theoretical worst case was a small loss — is a small,
-real gain on real firmware.
-
-**0003 is retired, not deleted**: decoder2 removes its target from the hot
-path, so the decoder2 series (the default) excludes it; it still applies and
-still helps on a pre-decoder2 master checkout via `-DNUKED_DIR`, which is the
-only reason the file stays.
-
-## Upstream's assessment, and what decoder2 changes
-
-The fork's maintainer was sent this series and replied. Paraphrasing their
-points: many of the smaller patches "should have no measurable effect" because
-"compilers can do a lot of these transformations automatically"; the ones that
-hoist conditions to the caller are "made redundant by
-`CMAKE_INTERPROCEDURAL_OPTIMIZATION=ON`"; the instruction-fetch work is
-"invalidated" by their `development/decoder2` branch; and any further
-performance work should be based on that branch
-(`-DNUKED_ENABLE_DECODER2=ON`, to become the default in 0.7.0), which caches
-decoded instructions and avoids `MCU_Read` for the majority of memory loads —
-possibly enough to run mk2 romsets on a Pi 3. Memory layout and cache
-efficiency are on their list for after 0.7.0: *"I know the large structures are
-not ideal."*
-
-Most of that is right. One part is measurably not, and the difference is worth
-being precise about.
-
-### Right: the small MCU patches are noise
-
-Their prediction matches what this file already records. 0003 is −0.36%, 0004
-is −0.96%, and 0005's −2.64% is an artefact of placeholder firmware whose real
-worst case is a ~0.08% *loss*. Three patches, about 1% between them, one of
-which may be negative on real ROMs. Nothing in the series' headline depends on
-them.
-
-### Right: 0003 is superseded
-
-Confirmed from the branch rather than assumed. decoder2 replaces the body of
-`MCU_ReadInstruction` with a call to `decoder2::FetchDecodeExecuteNext(mcu)`,
-so `MCU_ReadCodeAdvance` — the function 0003 fast-paths — is no longer on the
-hot path at all. 0003 should be dropped when we move, not rebased.
-
-### Right: decoder2 is where to work next, and moving is cheap
-
-The branch is 63 commits and +10,628 lines, but almost all of it is new files
-under `src/backend/decoder2/`. Outside that directory it touches
-`mcu.cpp` (6 lines), `mcu.h` (17), `rom_loader.cpp` (12), plus build glue.
-`pcm.cpp`, `mcu_timer.cpp`, `submcu.cpp`, `mcu_interrupt.cpp` and `rom_io.cpp`
-are untouched.
-
-So the series survives the move nearly intact. Applied in order against
-`origin/development/decoder2` at `36fb091`, exactly as CMake applies them:
-
-```
-12 of 13 apply clean
-0006-mcu-hot-field-layout.patch   hunk 4 of 4 rejected
-```
-
-0006's rejected hunk is the tail of `mcu_t`, where decoder2 appends an
-`icache` member. That is a context conflict, not a design conflict — rebasing
-it means deciding where `icache` belongs in the reordered struct, which is the
-patch's whole subject anyway.
-
-### Not right: IPO cannot make them redundant, because IPO was already on
-
-`CMakeLists.txt` sets `CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON`, and
-compiles the core's translation units *into the sc55d executable target* rather
-than linking a separate library, so the compiler sees core and frontend as one
-unit before LTO even runs. Both sides of the measurement were built that way —
-`build-patch-off.log` and `build-patch-on.log` each open with `sc55d:
-link-time optimization enabled`.
-
-The **+43.5% realtime ratio and −45.1% retired instructions are therefore a
-measurement taken with `CMAKE_INTERPROCEDURAL_OPTIMIZATION=ON` on both sides**,
-which is the configuration the claim says should erase them. Turning LTO off
-costs a further +8.9% on its own, so the two are additive rather than
-substitutes.
-
-The reason is what the patches carrying the weight actually do. None of these
-is a transformation a compiler performs:
-
-| | Why no compiler does it |
-|---|---|
-| 0001, `TIMER_Clock` 2295M → 38M | Replaces an iterative countdown with a closed-form next-event calculation. Algorithmic. |
-| 0002, 5.1x startup | Materialises two fixed bit permutations as 8.25 KiB of tables. |
-| 0006, 0007 | Reorders struct members. Layout is ABI — a compiler is *forbidden* from doing this. |
-| 0008–0012, −21.0% of PCM per tick | Hoists invariants out of a path that recomputed them 97 times per tick, templates on a runtime value, deletes provably dead work. Stable between −19.7% and −22.7% across every activity level. |
-
-### Layout: the part worth comparing notes on
-
-Their post-0.7.0 plan and 0006/0007 are aimed at the same thing, so here is
-what was measured, on decoder2's own `mcu_t` at `36fb091`:
-
-```
-sizeof(mcu_t)          664936 bytes
-offsetof(rom1)              48
-offsetof(uart_buffer)   656616
-offsetof(operand_type)  664892
-offsetof(icache)        664928   (8 bytes -- a handle, not an inline table)
-```
-
-`icache` is fine: 8 bytes, 36 from the operand fields. The cost is that the
-**per-instruction operand fields sit at offset 664892**, behind 649 KiB of ROM
-and RAM arrays — and on AArch64 that is not merely a cache question. A scaled
-12-bit immediate reaches 16380 bytes for a 32-bit load, so a field that deep
-cannot be addressed in one instruction:
-
-```
-             struct field at offset 664892      struct field at offset 48
-aarch64      add x0, x0, 655360                 ldr w0, [x0, 48]
-             ldr w0, [x0, 9532]
-```
-
-Two instructions instead of one, on every access, for every hot field past
-16 KiB. That is the mechanism behind 0006's measured **−5 instructions per
-emulated instruction on AArch64 and ~0 on x86-64** — x86-64 has 32-bit
-displacements, so the deep field costs it nothing and the patch looks pointless
-there. It is measurable in retired instructions without a cache profiler, and
-it is the strongest argument for doing the layout work: on the boards this
-project targets, the large structures cost instructions, not just misses.
-
-### Building it, to benchmark it
-
-The submodule stays pinned to master, so decoder2 is opt-in and needs a checkout
-that carries the branch:
-
-```bash
-git -C vendor/nuked-sc55 fetch origin development/decoder2
-git -C vendor/nuked-sc55 checkout FETCH_HEAD
-
-cmake -S . -B build-d2 -DCMAKE_BUILD_TYPE=Release -DSC55D_CPU=cortex-a72 \
-      -DSC55D_DECODER2=ON
-cmake --build build-d2 -j4
-```
-
-`-DSC55D_DECODER2=ON` drops 0003, substitutes `patches/decoder2/0006` for
-`patches/0006`, compiles the branch's 19 decoder sources into sc55d, and sets
-`NUKED_ENABLE_DECODER2=1` in the core's generated `config.h`. Without the flag
-nothing changes, so the default build is unaffected either way.
-
-Checking the submodule out at the branch leaves its pointer dirty in
-`git status` — that is expected, and it should not be committed.
-`git submodule update --checkout` puts it back. `-DNUKED_DIR=<path>` works
-instead, if you would rather keep a separate checkout.
-
-The comparison worth making is four builds on one board and one romset, since
-the interesting quantity is what decoder2 adds *on top of* the series rather
-than against a stock core:
-
-```bash
-                                          # patches   decoder
-./build/sc55d    --roms R --bench --no-realtime   # 13        old
-./build-d2/sc55d --roms R --bench --no-realtime   # 12        new
-#   ... and each again with -DSC55D_PATCH_CORE=OFF for the two baselines
-```
-
-**The four digests must agree.** `--bench` prints an FNV-1a digest of everything
-it renders, and it is the whole validation: upstream intends decoder2 to be
-behaviour-identical, our patches are required to be, and nothing here has
-confirmed either on this branch. A digest marked `(SILENT)` means the run
-produced no audio and the comparison is worthless. Read `worst second`, not the
-average, and if the board is close to the line run the core's 36 mk2
-integration cases as described under [Validation status](#validation-status)
-before trusting a decoder2 build with anything.
-
-### What was and was not checked here
-
-Verified on x86-64, with no romset available:
-
-- the twelve-patch decoder2 series applies in order, exactly as CMake applies
-  it, against `36fb091`;
-- both builds configure and compile clean, and the decoder2 binary runs;
-- the default build is untouched — `patches/decoder2/0006` is unreachable
-  without `-DSC55D_DECODER2=ON`;
-- the rebased 0006 does what it is for. On decoder2's `mcu_t`:
-
-  | | unpatched | rebased 0006 |
-  |---|---|---|
-  | `offsetof(operand_type)` | 664892 | **104** |
-  | `offsetof(icache)` | 664928 | **208** |
-  | `offsetof(rom1)` (bulk memory) | 48 | 344 |
-  | `sizeof(mcu_t)` | 664936 | 664920 |
-
-  Every per-instruction field lands inside the 16380-byte reach of an AArch64
-  scaled 12-bit immediate, `icache` included.
-
-**Not verified: any audio at all from a decoder2 build.** There are no ROMs on
-the machine this was prepared on, so nothing here has rendered a sample through
-the new decoder. That is what the digest comparison above is for, and it has to
-happen before a decoder2 build is used for anything but benchmarking.
-
-### What this does not settle
-
-Whether decoder2 delivers enough to run an mk2 romset on a Pi 3 is unmeasured
-here, and deliberately so. Its benefit is caching *decoded real instructions*
-and skipping `MCU_Read`; a benchmark with placeholder ROMs has both CPUs
-executing mostly invalid opcodes, so it would measure the decode cache against
-trap paths and report a number that means nothing. That comparison needs real
-ROMs, and the answer for a Pi 3 needs a Pi 3.
-
-## Rejected
-
-Things measured and thrown away, so nobody repeats them:
-
-- **Branch-free wave ROM banking.** `PCM_ReadROM()` runs ~10M times a second and
-  re-derives its bank layout on every call — a branch, an 8-way switch and a load
-  from the MCU struct to re-test `is_mk1`/`is_jv880`, all of which are fixed once
-  ROMs are loaded. Hoisting it into a precomputed `{base, mask}[8]` table made
-  things *slightly slower*: those branches are perfectly predictable, so they were
-  already free, and the table replaced them with a dependent load. Callgrind
-  confirmed `PCM_ReadROM` is only 3.4% of instructions. Not worth revisiting
-  unless a profile on the target says otherwise.
-
-- **Making the core's UART FIFO thread-safe.** `mcu_t::uart_buffer` with its
-  `uart_write_ptr`/`uart_read_ptr` pair is a single-producer ring with no
-  synchronisation at all: `MCU_PostUART()` stores the byte and then bumps the
-  pointer, both plain stores; `SM_UpdateUART()` polls the pointer and then reads
-  the byte, both plain loads. Posting to it from a MIDI thread — which is what
-  upstream's RtMidi callback does, and what sc55d did until the render-ahead
-  work — is a data race, and on a weakly ordered Cortex-A53 a real one: the core
-  can observe the advanced write pointer before the byte it points at and take
-  whatever was in that slot the previous time round the 8 KiB buffer. A
-  corrupted status byte is a stuck note, and it would be rare, silent and
-  miserable to debug on a Pi.
-
-  The obvious patch makes `uart_write_ptr` a `std::atomic<uint32_t>`, publishes
-  with `memory_order_release`, and polls with a *relaxed* load plus an acquire
-  fence on the rare path where a byte is present — so the fence never runs in
-  the hot loop. It was written and it works: bit-identical audio, digest
-  `b1e9a497433a81fa` unchanged.
-
-  It was still rejected, because GCC's AArch64 backend will not fold an atomic
-  load into an offset addressing mode, even a relaxed one, and will not pair it
-  with the adjacent plain load of `uart_read_ptr`:
-
-  ```
-  plain    ldp w1, w0, [x0, 160]                   # 1 instruction
-  atomic   add x1, x0, 160 ; ldr w1, [x1] ; ldr w0, [x0, 164]   # 3
-  ```
-
-  `__atomic_load_n()` on a plain field generates the same three; `volatile` gets
-  the offset back but gives no ordering, so it does not fix anything. The poll
-  runs once per sub-MCU instruction — measured 14,822,370 times per two seconds
-  of real mk2 audio, against a program total of 8,766,976,430 instructions — so
-  three extra instructions is about **0.51% of the whole program**, paid forever,
-  on the target architecture.
-
-  The fix belongs on our side of the boundary instead. `src/midi_queue.h` is a
-  properly synchronised SPSC byte queue; the render thread drains it and is the
-  only thread that ever calls into the core, so the core's FIFO becomes what it
-  was always written as — single-threaded — and the hot poll keeps its `ldp`.
-  It costs one relaxed load per drain, four times per period.
+## Validation
+
+**Upstream's own integration cases.** The core's `test/integration/` carries
+real MIDI files with the **expected SHA-256 of the rendered audio** — an
+absolute reference published by upstream, not a comparison against ourselves.
+All **37** mk2-family cases match with the four patches applied (36 on the
+core's master; the decoder2 branch adds one). Reproducing it needs the core's
+`nuked-sc55-render` target and your own ROMs; note their renderer needs
+RtMidi present to configure, even though it does not use it.
+
+**Digest.** `--bench` prints an FNV-1a digest of everything it renders. With a
+real `mk2-v1.01` set the patched and unpatched cores render **bit-identical
+audio** (`6154f44b25c3b441` over the 30-second bench, `c090f4a7b860f585` for
+mk1), and the aarch64 builds produce the same digests as x86-64 — every one
+of the board runs behind the tables above printed it. A digest marked
+`(SILENT)` means the run produced no audio and the comparison is worthless.
+`scripts/validate-patches.sh` runs the patched-versus-unpatched comparison
+against your own ROMs and romsets.
+
+**Not validated: `st`, `cm300`, `jv880`, `scb55`, `rlp3237`, `sc155`.** No
+ROMs for them were available. If you run one of these, run
+`scripts/validate-patches.sh --roms <dir>` first, or build with
+`-DSC55D_PATCH_CORE=OFF`.
+
+## How the four were chosen
+
+Every patch that has ever been in this series was measured alone — leave-one-out
+builds under callgrind on x86-64 with real ROMs, and worst-second A/B on the
+Pi 3 and Pi 4 for anything whose value was claimed to be architecture-specific
+— with a fully unpatched control and a digest check on every build. The
+per-patch numbers, the additivity cross-checks (the x86 contributions sum to
+102.3% of the directly measured whole; the board deltas to within 0.01 point),
+and the reasons each dropped patch was retired are in
+[`attic/README.md`](attic/README.md). The bar was simple: does removing it
+move the mkII on a Pi 3? Twelve did not, or did so by less than the noise of
+the measurement, and a patch that is provably correct and worth 0.2% is still
+noise to a maintainer.
+
+## What was tried and rejected
+
+Measured and thrown away, so nobody repeats them:
+
+- **Branch-free wave ROM banking.** `PCM_ReadROM()` re-derives its bank layout
+  on every call. Hoisting it into a precomputed `{base, mask}[8]` table made
+  things *slightly slower*: the branches are perfectly predictable, and the
+  table replaced them with a dependent load.
+- **Making the core's UART FIFO thread-safe** with an atomic write pointer.
+  Bit-identical, and rejected because GCC's AArch64 backend will not fold an
+  atomic load into an offset addressing mode: three instructions instead of
+  one `ldp` on a poll that runs once per sub-MCU instruction, about 0.5% of the
+  whole program, forever. The fix belongs on the frontend's side of the
+  boundary (`src/midi_queue.h`), where it is.
+- **Batching the sub-MCU or PCM steps** across main-MCU instructions. Not
+  equivalence-preserving: `PCM_Write`/`PCM_Read` do not self-sync, and the
+  sub-MCU's interleaving with the main MCU is observable through shared RAM.
+  The fast-forward in 0004 is the exact version of this idea — it skips only
+  what is provably unobservable.
+- **`-O3`**: a measured regression on the A53 (−4.6% worst-second), consistent
+  with the decoder's 1400 indirect-branch targets and I-cache pressure.
+  **`-Os`**: −35% in dynamic instructions. **PGO**: worth about 5% on top of
+  the series and plumbed (`SC55D_PGO=generate|use`), but no longer required.
+
+`candidates/` holds one further patch, written and proven but parked: skipping
+idle voice slots is −51% of PCM per tick on typical material and +2% at full
+polyphony, and realtime is decided by the worst case.

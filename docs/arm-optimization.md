@@ -278,7 +278,7 @@ The instinct is right — interpreting a CPU is slow, and dynamic recompilation 
 the standard cure. The profile says it is aimed at the wrong quarter of the
 work.
 
-**With real ROMs, after the thirteen patches**, retired instructions divide
+**With real ROMs, after the thirteen patches of the time** (the series has since been reduced to four; see `patches/README.md`), retired instructions divide
 roughly like this:
 
 | | share |
@@ -326,7 +326,7 @@ an emulator, not to speed one up.
    retired instructions, for a command-line flag.
 2. `PCM_Update`, at half the remaining cost, is the only target that matters.
    SIMD across its slots is blocked for the reasons in the NEON section; what
-   is left is more of the algebraic work patches 0008-0012 did, and `calc_tv`
+   is left is more of the algebraic work the PCM patch (formerly 0008-0012, now `0003-pcm-per-tick-work`) did, and `calc_tv`
    is still the largest single piece of it.
 3. Faster hardware. A Pi 5 is the cheapest 2x available and needs no code.
 

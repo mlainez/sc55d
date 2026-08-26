@@ -1,0 +1,553 @@
+pcm: do the per-tick work once per tick, not once per slot
+
+Five changes to the PCM chip's inner loop that share one idea: work that is
+constant across the 32 voice slots, or across the four address-step
+iterations, or provably dead below a threshold, was being redone at every
+site. None of it changes what is computed, only how often.
+
+  * calc_tv's per-tick invariants -- the tap table and a 256-entry type
+    table -- are built once per tick instead of 97 recomputations per tick.
+  * The address step is 0, -1 or +1 with a per-slot sign, so the arithmetic
+    that derived it folds to boolean algebra, and reg_slots is hoisted.
+  * calc_tv is templated on the envelope index: at all four call sites the
+    index is a literal, and the e == 2 instantiation drops its dead half.
+  * Only 6 of 32 slots inject into the reverb bus; two indirect jumps per
+    slot become one predictable test -- worth more than its instruction
+    count on an in-order core, where an indirect branch is expensive.
+  * Below the sub_phase_of threshold the fourth address step is dead, and
+    with it one of the five wave-ROM reads per slot.
+
+Together they are -21.0% of PCM per tick with all 32 voices sounding, and
+between -19.7% and -22.7% across every activity level -- the saving does
+not depend on how busy the synth is. On real mk2 ROMs they are 11.2% of the
+whole emulator's retired instructions. Equivalence: pcm.cpp built twice into
+a driver that digests the entire mutable PCM state each tick -- ram1, ram2,
+all of eram, every scalar, every sample and every interrupt -- over 44 cases
+in 10 modes, including two wide-pitch modes added specifically so that the
+fourth-step branch is exercised; see patches/tests/pcm/.
+
+--- a/src/backend/pcm.cpp
++++ b/src/backend/pcm.cpp
+@@ -320,7 +320,74 @@
+     },
+ };
+ 
+-inline void calc_tv(pcm_t& pcm, int e, int adjust, uint16_t *levelcur, int active, int *volmul)
++// `type` and the tap selector are a pure function of the 8-bit `speed` field
++// and of pcm.nfs, which only ever clears bit 3.  256 bytes, built at compile
++// time from the same expressions it replaces.
++struct calc_tv_type_lut_t
++{
++    uint8_t v[256];
++    constexpr calc_tv_type_lut_t() : v()
++    {
++        for (int speed = 0; speed < 256; speed++)
++        {
++            const bool w1 = (speed & 0xf0) == 0;
++            const bool w2 = w1 || (speed & 0x10) != 0;
++            const bool w3 = ((speed & 0x80) == 0
++                             || ((speed & 0x40) == 0 && (!w2 || (speed & 0x20) == 0)));
++            int type = (int)w2 | ((int)w3 << 3);
++            if (speed & 0x20)
++                type |= 2;
++            if ((speed & 0x80) == 0 || (speed & 0x40) == 0)
++                type |= 4;
++            const int sel = (type & 4) ? 4 : (type & 3);
++            v[speed] = (uint8_t)(type | (sel << 4));
++        }
++    }
++};
++static constexpr calc_tv_type_lut_t calc_tv_type_lut{};
++
++// Per-tick invariants of calc_tv().
++//
++// calc_tv() is called 97 times per PCM tick (3 per voice slot, plus one for the
++// pseudo-slot 31 chorus/reverb envelope).  Two of the things it computes do not
++// depend on the slot at all:
++//
++//   * `addlow`, a four-bit reversal of four bits tapped out of pcm.tv_counter,
++//   * the counter half of the `write` enable,
++//
++// and both depend on `type` only through a five-way selector: `type & 4` picks
++// one tap set, otherwise `type & 3` picks one of four more.  pcm.tv_counter is
++// updated exactly once per tick, so all five (addlow, write) pairs can be
++// computed once a tick and indexed instead of recomputed 97 times.
++struct tv_taps
++{
++    uint8_t addlow[5];
++    uint8_t write[5];
++};
++
++inline void tv_taps_compute(tv_taps& t, uint32_t c)
++{
++    // bit-reversed four-bit taps; the shifts below mirror the original
++    // `if (counter & bit) addlow |= n;` ladders exactly.
++    t.addlow[0] = (uint8_t)(((c >> 5) & 1) | (((c >> 4) & 1) << 1) | (((c >> 3) & 1) << 2) | (((c >> 2) & 1) << 3));
++    t.addlow[1] = (uint8_t)(((c >> 7) & 1) | (((c >> 6) & 1) << 1) | (((c >> 5) & 1) << 2) | (((c >> 4) & 1) << 3));
++    t.addlow[2] = (uint8_t)(((c >> 9) & 1) | (((c >> 8) & 1) << 1) | (((c >> 7) & 1) << 2) | (((c >> 6) & 1) << 3));
++    t.addlow[3] = (uint8_t)(((c >> 11) & 1) | (((c >> 10) & 1) << 1) | (((c >> 9) & 1) << 2) | (((c >> 8) & 1) << 3));
++    t.addlow[4] = (uint8_t)(((c >> 3) & 1) | (((c >> 2) & 1) << 1) | (((c >> 1) & 1) << 2) | (((c >> 0) & 1) << 3));
++    t.write[0]  = (uint8_t)((c & 3) == 0);
++    t.write[1]  = (uint8_t)((c & 15) == 0);
++    t.write[2]  = (uint8_t)((c & 63) == 0);
++    t.write[3]  = (uint8_t)((c & 127) == 0);
++    t.write[4]  = 1;
++}
++
++// `e` selects which of the three envelopes is being stepped and is a literal at
++// every call site.  Making it a template parameter lets the compiler drop the
++// dead half of the function per instantiation - in particular the e == 2 case,
++// which is called once per voice slot with volmul == NULL and therefore needs
++// none of the volmul arithmetic at all.
++template <int e>
++inline void calc_tv(pcm_t& pcm, const tv_taps& taps, int adjust, uint16_t *levelcur, int active, int *volmul)
+ {
+     // int adjust = ram2[3+e];
+     // int levelcur = ram2[9+e] & 0x7fff;
+@@ -329,82 +396,11 @@
+     int target = (adjust >> 8) & 0xff;
+ 
+                 
+-    const bool w1 = (speed & 0xf0) == 0;
+-    const bool w2 = w1 || (speed & 0x10) != 0;
+-    const bool w3 = pcm.nfs &&
+-        ((speed & 0x80) == 0 || ((speed & 0x40) == 0 && (!w2 || (speed & 0x20) == 0)));
+-
+-    int type = (int)w2 | ((int)w3 << 3);
+-    if (speed & 0x20)
+-        type |= 2;
+-    if ((speed & 0x80) == 0 || (speed & 0x40) == 0)
+-        type |= 4;
+-
+-
+-    bool write = !active;
+-    int addlow = 0;
+-    if (type & 4)
+-    {
+-        if (pcm.tv_counter & 8)
+-            addlow |= 1;
+-        if (pcm.tv_counter & 4)
+-            addlow |= 2;
+-        if (pcm.tv_counter & 2)
+-            addlow |= 4;
+-        if (pcm.tv_counter & 1)
+-            addlow |= 8;
+-        write |= 1;
+-    }
+-    else
+-    {
+-        switch (type & 3)
+-        {
+-        case 0:
+-            if (pcm.tv_counter & 0x20)
+-                addlow |= 1;
+-            if (pcm.tv_counter & 0x10)
+-                addlow |= 2;
+-            if (pcm.tv_counter & 8)
+-                addlow |= 4;
+-            if (pcm.tv_counter & 4)
+-                addlow |= 8;
+-            write |= (pcm.tv_counter & 3) == 0;
+-            break;
+-        case 1:
+-            if (pcm.tv_counter & 0x80)
+-                addlow |= 1;
+-            if (pcm.tv_counter & 0x40)
+-                addlow |= 2;
+-            if (pcm.tv_counter & 0x20)
+-                addlow |= 4;
+-            if (pcm.tv_counter & 0x10)
+-                addlow |= 8;
+-            write |= (pcm.tv_counter & 15) == 0;
+-            break;
+-        case 2:
+-            if (pcm.tv_counter & 0x200)
+-                addlow |= 1;
+-            if (pcm.tv_counter & 0x100)
+-                addlow |= 2;
+-            if (pcm.tv_counter & 0x80)
+-                addlow |= 4;
+-            if (pcm.tv_counter & 0x40)
+-                addlow |= 8;
+-            write |= (pcm.tv_counter & 63) == 0;
+-            break;
+-        case 3:
+-            if (pcm.tv_counter & 0x800)
+-                addlow |= 1;
+-            if (pcm.tv_counter & 0x400)
+-                addlow |= 2;
+-            if (pcm.tv_counter & 0x200)
+-                addlow |= 4;
+-            if (pcm.tv_counter & 0x100)
+-                addlow |= 8;
+-            write |= (pcm.tv_counter & 127) == 0;
+-            break;
+-        }
+-    }
++    const int packed = calc_tv_type_lut.v[speed];
++    const int type = pcm.nfs ? (packed & 15) : (packed & 7);
++    const int sel = packed >> 4;
++    const int addlow = taps.addlow[sel];
++    const bool write = !active || taps.write[sel] != 0;
+ 
+     if ((type & 8) == 0)
+     {
+@@ -438,7 +434,7 @@
+     else
+     {
+         int shift = (speed >> 4) & 14;
+-        shift |= (int)w2;
++        shift |= type & 1;              // type bit 0 is w2
+         shift = (10 - shift) & 15;
+ 
+         int sum1 = target << 11; // 5
+@@ -446,7 +442,7 @@
+             sum1 -= (*levelcur << 4); // 6
+         const bool neg = (sum1 & 0x80000) != 0;
+         int preshift = (speed & 15) << 9;
+-        if (!w1)
++        if ((speed & 0xf0) != 0)        // !w1
+             preshift |= 0x2000;
+         if (neg)
+             preshift ^= ~0x3f;
+@@ -647,6 +643,9 @@
+             pcm.tv_counter &= 0x3fff;
+         }
+ 
++        tv_taps taps;
++        tv_taps_compute(taps, pcm.tv_counter);
++
+         // chorus/reverb
+ 
+         { // fixme
+@@ -675,7 +674,7 @@
+             const bool key = 1;
+             const bool active = okey && key;
+             int u = 0;
+-            calc_tv(pcm, 1, pcm.ram2[30][0], &pcm.ram2[30][9], active, &u);
++            calc_tv<1>(pcm, taps, pcm.ram2[30][0], &pcm.ram2[30][9], active, &u);
+         }
+ 
+         {
+@@ -1051,16 +1050,10 @@
+ 
+                     int next_address = address_cnt; // 11
+ 
+-                    cmp1 = (!b6 && address_cmp) ? address_loop : address_cnt;
+-                    cmp2 = address_cnt;
+-                    int address_cnt2 = (kon || (!b6 && address_cmp)) ? cmp1 : cmp2;
++                    int address_cnt2 = (!b6 && address_cmp) ? address_loop : address_cnt;
+ 
+-                    const bool address_add = (!address_cmp && b6 && !b15) || (!address_cmp && !b6);
+-                    const bool address_sub = !address_cmp && b6 && b15;
+-                    if (b7)
+-                        address_cnt2 -= address_add - address_sub;
+-                    else
+-                        address_cnt2 += address_add - address_sub;
++                    if (!address_cmp)
++                        address_cnt2 += (b6 && b15) ? (b7 ? 1 : -1) : (b7 ? -1 : 1);
+                     address_cnt = address_cnt2 & 0xfffff; // 11
+                     b15 = b6 && (b15 ^ address_cmp); // 11
+ 
+@@ -1099,7 +1092,8 @@
+         pcm.rcsum[0] = 0;
+         pcm.rcsum[1] = 0;
+ 
+-        for (int slot = 0; slot < pcm.config.reg_slots; slot++)
++        const int nslots = pcm.config.reg_slots;
++        for (int slot = 0; slot < nslots; slot++)
+         {
+             uint32_t *ram1 = pcm.ram1[slot];
+             uint16_t *ram2 = pcm.ram2[slot];
+@@ -1114,6 +1108,14 @@
+             bool b15 = (ram2[8] & 0x8000) != 0; // 0
+             const bool b6 = (ram2[7] & 0x40) != 0; // 1
+             const bool b7 = (ram2[7] & 0x80) != 0; // 1
++            // Each of the four address steps below computed
++            //     add = (!cmp && b6 && !b15) || (!cmp && !b6);
++            //     sub = !cmp && b6 && b15;
++            //     cnt = b7 ? cnt - (add - sub) : cnt + (add - sub);
++            // (add - sub) is 0 when cmp, -1 when (b6 && b15), +1 otherwise, so
++            // the whole thing is a single signed step whose sign is fixed for
++            // the slot by b7.  Identical result, no per-step boolean algebra.
++            const int stepdir = b7 ? -1 : 1;
+             int hiaddr = (ram2[7] >> 8) & 15; // 1
+             int old_nibble = (ram2[7] >> 12) & 15; // 1
+ 
+@@ -1180,16 +1182,13 @@
+             bool usenew = !nibble_cmp2;
+             bool next_b15 = b15;
+ 
+-            cmp1 = (!b6 && address_cmp) ? address_loop : address_cnt;
+-            cmp2 = address_cnt;
+-            int address_cnt2 = (kon || (!b6 && address_cmp)) ? cmp1 : cmp2;
++            // `kon` cannot change the outcome here: when (!b6 && address_cmp)
++            // holds the selected value is address_loop either way, and when it
++            // does not, both arms of the outer select are address_cnt.
++            int address_cnt2 = (!b6 && address_cmp) ? address_loop : address_cnt;
+ 
+-            bool address_add = (!address_cmp && b6 && !b15) || (!address_cmp && !b6);
+-            bool address_sub = !address_cmp && b6 && b15;
+-            if (b7)
+-                address_cnt2 -= address_add - address_sub;
+-            else
+-                address_cnt2 += address_add - address_sub;
++            if (!address_cmp)
++                address_cnt2 += (b6 && b15) ? -stepdir : stepdir;
+             address_cnt = address_cnt2 & 0xfffff; // 11
+             b15 = b6 && (b15 ^ address_cmp); // 11
+ 
+@@ -1209,16 +1208,10 @@
+                 next_b15 = b15;
+             }
+ 
+-            cmp1 = (!b6 && address_cmp) ? address_loop : address_cnt;
+-            cmp2 = address_cnt;
+-            address_cnt2 = (kon || (!b6 && address_cmp)) ? cmp1 : cmp2;
++            address_cnt2 = (!b6 && address_cmp) ? address_loop : address_cnt;
+ 
+-            address_add = (!address_cmp && b6 && !b15) || (!address_cmp && !b6);
+-            address_sub = !address_cmp && b6 && b15;
+-            if (b7)
+-                address_cnt2 -= address_add - address_sub;
+-            else
+-                address_cnt2 += address_add - address_sub;
++            if (!address_cmp)
++                address_cnt2 += (b6 && b15) ? -stepdir : stepdir;
+             address_cnt = address_cnt2 & 0xfffff; // 15
+             b15 = b6 && (b15 ^ address_cmp); // 15
+ 
+@@ -1238,57 +1231,60 @@
+                 next_b15 = b15;
+             }
+ 
+-            cmp1 = (!b6 && address_cmp) ? address_loop : address_cnt;
+-            cmp2 = address_cnt;
+-            address_cnt2 = (kon || (!b6 && address_cmp)) ? cmp1 : cmp2;
++            address_cnt2 = (!b6 && address_cmp) ? address_loop : address_cnt;
+ 
+-            address_add = (!address_cmp && b6 && !b15) || (!address_cmp && !b6);
+-            address_sub = !address_cmp && b6 && b15;
+-            if (b7)
+-                address_cnt2 -= address_add - address_sub;
+-            else
+-                address_cnt2 += address_add - address_sub;
++            if (!address_cmp)
++                address_cnt2 += (b6 && b15) ? -stepdir : stepdir;
+             address_cnt = address_cnt2 & 0xfffff; // 19
+             b15 = b6 && (b15 ^ address_cmp); // 19
+ 
+-            int samp3 = (int8_t)PCM_ReadROM(pcm, (uint32_t)((hiaddr << 20) | address_cnt)); // 5
+-
+-            cmp1 = address;
+-            cmp2 = address_cnt;
+-            const bool nibble_cmp5 = (cmp1 & 0xffff0) == (cmp2 & 0xffff0); // 20
+-            cmp1 = b15 ? address_loop : address_end;
+-            cmp2 = address_cnt;
+-            address_cmp = (cmp1 & 0xfffff) == (cmp2 & 0xfffff); // 21
++            // Everything left in the address generator is consumed only by the
++            // `sub_phase_of >= 3` and `>= 4` updates below and by the samp3 term
++            // of the DPCM accumulation, which is itself guarded on `>= 4`.  b15
++            // is deliberately not advanced past step 3 in the original, and
++            // address_cmp, address_cnt, cmp1, cmp2 and nibble_cmp6 are all dead
++            // after this point, so when sub_phase_of is below the threshold the
++            // whole tail - including one of the five wave ROM reads - can be
++            // skipped outright.  sub_phase_of is (sub_phase >> 14) & 7 where
++            // sub_phase is a 14-bit accumulator plus a 16-bit increment, so it
++            // reaches 3 or 4 only for voices pitched three or four wave samples
++            // per output sample.
++            int samp3 = 0;
++            bool nibble_cmp5 = false;
+ 
+             if (sub_phase_of >= 3)
+             {
+                 next_address = address_cnt; // 21
+-                usenew = !nibble_cmp5;
+                 next_b15 = b15;
+-            }
+ 
+-            cmp1 = (!b6 && address_cmp) ? address_loop : address_cnt;
+-            cmp2 = address_cnt;
+-            address_cnt2 = (kon || (!b6 && address_cmp)) ? cmp1 : cmp2;
++                cmp1 = address;
++                cmp2 = address_cnt;
++                nibble_cmp5 = (cmp1 & 0xffff0) == (cmp2 & 0xffff0); // 20
++                usenew = !nibble_cmp5;
+ 
+-            address_add = (!address_cmp && b6 && !b15) || (!address_cmp && !b6);
+-            address_sub = !address_cmp && b6 && b15;
+-            if (b7)
+-                address_cnt2 -= address_add - address_sub;
+-            else
+-                address_cnt2 += address_add - address_sub;
+-            address_cnt = address_cnt2 & 0xfffff; // 23
+-            // b15 = b6 && (b15 ^ address_cmp); // 23
++                if (sub_phase_of >= 4)
++                {
++                    samp3 = (int8_t)PCM_ReadROM(pcm, (uint32_t)((hiaddr << 20) | address_cnt)); // 5
+ 
+-            cmp1 = address;
+-            cmp2 = address_cnt;
+-            const bool nibble_cmp6 = (cmp1 & 0xffff0) == (cmp2 & 0xffff0); // 24
++                    cmp1 = b15 ? address_loop : address_end;
++                    cmp2 = address_cnt;
++                    address_cmp = (cmp1 & 0xfffff) == (cmp2 & 0xfffff); // 21
+ 
+-            if (sub_phase_of >= 4)
+-            {
+-                next_address = address_cnt; // 1
+-                usenew = !nibble_cmp6;
+-                // b15 is not updated?
++                    address_cnt2 = (!b6 && address_cmp) ? address_loop : address_cnt;
++
++                    if (!address_cmp)
++                        address_cnt2 += (b6 && b15) ? -stepdir : stepdir;
++                    address_cnt = address_cnt2 & 0xfffff; // 23
++                    // b15 = b6 && (b15 ^ address_cmp); // 23
++
++                    cmp1 = address;
++                    cmp2 = address_cnt;
++                    const bool nibble_cmp6 = (cmp1 & 0xffff0) == (cmp2 & 0xffff0); // 24
++
++                    next_address = address_cnt; // 1
++                    usenew = !nibble_cmp6;
++                    // b15 is not updated?
++                }
+             }
+ 
+             if (active && pcm.nfs)
+@@ -1333,14 +1329,16 @@
+             if (sub_phase_of >= 3)
+                 reference = addclip20(reference, shifted >> 1, shifted & 1);
+ 
+-            preshift = samp3 << 10;
+-            select_nibble = nibble_cmp5 ? old_nibble : newnibble;
+-            shift = (10 - select_nibble) & 15;
++            if (sub_phase_of >= 4)
++            {
++                preshift = samp3 << 10;
++                select_nibble = nibble_cmp5 ? old_nibble : newnibble;
++                shift = (10 - select_nibble) & 15;
+ 
+-            shifted = (preshift << 1) >> shift;
++                shifted = (preshift << 1) >> shift;
+ 
+-            if (sub_phase_of >= 4)
+                 reference = addclip20(reference, shifted >> 1, shifted & 1);
++            }
+ 
+             // interpolation
+ 
+@@ -1442,9 +1440,9 @@
+             int volmul1 = 0;
+             int volmul2 = 0;
+ 
+-            calc_tv(pcm, 0, ram2[3], &ram2[9], active, &volmul1);
+-            calc_tv(pcm, 1, ram2[4], &ram2[10], active, &volmul2);
+-            calc_tv(pcm, 2, ram2[5], &ram2[11], active, NULL);
++            calc_tv<0>(pcm, taps, ram2[3], &ram2[9], active, &volmul1);
++            calc_tv<1>(pcm, taps, ram2[4], &ram2[10], active, &volmul2);
++            calc_tv<2>(pcm, taps, ram2[5], &ram2[11], active, NULL);
+ 
+             // if (volmul1 && volmul2)
+             //     volmul1 += 0;
+@@ -1472,60 +1470,55 @@
+             int rc1 = multi(sample3, (int8_t)((rc >> 0) & 255)) >> 5; // chorus
+             
+             // mix reverb/chorus?
+-            int slot2 = (slot == pcm.config.reg_slots - 1) ? 31 : slot + 1;
+-            switch (slot2)
++            //
++            // Only six of the 32 slot positions inject anything, so both
++            // switches are skipped wholesale with one test on a constant mask
++            // (bits 17, 18, 21, 22, 23 and 31) instead of running a jump table
++            // twice per slot.  The second switch is merged into the first: it
++            // only touches pcm.rcsum, nothing between the two positions reads or
++            // writes pcm.rcsum, and suml/sumr depend only on ram1[31][1] and
++            // ram1[31][3], so the reordering is not observable.
++            int slot2 = (slot == nslots - 1) ? 31 : slot + 1;
++            if ((0x80e60000u >> slot2) & 1)
+             {
+-                // 17, 18 - reverb
++                switch (slot2)
++                {
++                    // 17, 18 - reverb
+ 
+-                case 17:
+-                    pcm.ram1[31][1] = (uint32_t)addclip20((int32_t)pcm.ram1[31][1], rcadd[0] >> 1, rcadd[0] & 1);
+-                    break;
+-                case 18:
+-                    pcm.ram1[31][3] = (uint32_t)addclip20((int32_t)pcm.ram1[31][3], rcadd[1] >> 1, rcadd[1] & 1);
+-                    break;
+-                case 21:
+-                    pcm.ram1[31][1] = (uint32_t)addclip20((int32_t)pcm.ram1[31][1], rcadd[2] >> 1, rcadd[2] & 1);
+-                    break;
+-                case 22:
+-                    pcm.ram1[31][3] = (uint32_t)addclip20((int32_t)pcm.ram1[31][3], rcadd[3] >> 1, rcadd[3] & 1);
+-                    break;
+-                case 23:
+-                    pcm.ram1[31][1] = (uint32_t)addclip20((int32_t)pcm.ram1[31][1], rcadd[4] >> 1, rcadd[4] & 1);
+-                    break;
+-                case 31:
+-                    pcm.ram1[31][3] = (uint32_t)addclip20((int32_t)pcm.ram1[31][3], rcadd[5] >> 1, rcadd[5] & 1);
+-                    break;
++                    case 17:
++                        pcm.ram1[31][1] = (uint32_t)addclip20((int32_t)pcm.ram1[31][1], rcadd[0] >> 1, rcadd[0] & 1);
++                        pcm.rcsum[1] = addclip20(pcm.rcsum[1], rcadd2[0] >> 1, rcadd2[0] & 1);
++                        break;
++                    case 18:
++                        pcm.ram1[31][3] = (uint32_t)addclip20((int32_t)pcm.ram1[31][3], rcadd[1] >> 1, rcadd[1] & 1);
++                        pcm.rcsum[1] = addclip20(pcm.rcsum[1], rcadd2[1] >> 1, rcadd2[1] & 1);
++                        break;
++                    case 21:
++                        pcm.ram1[31][1] = (uint32_t)addclip20((int32_t)pcm.ram1[31][1], rcadd[2] >> 1, rcadd[2] & 1);
++                        pcm.rcsum[0] = addclip20(pcm.rcsum[0], rcadd2[2] >> 1, rcadd2[2] & 1);
++                        break;
++                    case 22:
++                        pcm.ram1[31][3] = (uint32_t)addclip20((int32_t)pcm.ram1[31][3], rcadd[3] >> 1, rcadd[3] & 1);
++                        pcm.rcsum[1] = addclip20(pcm.rcsum[1], rcadd2[3] >> 1, rcadd2[3] & 1);
++                        break;
++                    case 23:
++                        pcm.ram1[31][1] = (uint32_t)addclip20((int32_t)pcm.ram1[31][1], rcadd[4] >> 1, rcadd[4] & 1);
++                        pcm.rcsum[0] = addclip20(pcm.rcsum[0], rcadd2[4] >> 1, rcadd2[4] & 1);
++                        break;
++                    case 31:
++                        pcm.ram1[31][3] = (uint32_t)addclip20((int32_t)pcm.ram1[31][3], rcadd[5] >> 1, rcadd[5] & 1);
++                        pcm.rcsum[1] = addclip20(pcm.rcsum[1], rcadd2[5] >> 1, rcadd2[5] & 1);
++                        break;
++                }
+             }
+ 
+             int32_t suml = addclip20((int32_t)pcm.ram1[31][1], sampl >> 6, (sampl >> 5) & 1);
+             int32_t sumr = addclip20((int32_t)pcm.ram1[31][3], sampr >> 6, (sampr >> 5) & 1);
+ 
+-            switch (slot2)
+-            {
+-                case 17:
+-                    pcm.rcsum[1] = addclip20(pcm.rcsum[1], rcadd2[0] >> 1, rcadd2[0] & 1);
+-                    break;
+-                case 18:
+-                    pcm.rcsum[1] = addclip20(pcm.rcsum[1], rcadd2[1] >> 1, rcadd2[1] & 1);
+-                    break;
+-                case 21:
+-                    pcm.rcsum[0] = addclip20(pcm.rcsum[0], rcadd2[2] >> 1, rcadd2[2] & 1);
+-                    break;
+-                case 22:
+-                    pcm.rcsum[1] = addclip20(pcm.rcsum[1], rcadd2[3] >> 1, rcadd2[3] & 1);
+-                    break;
+-                case 23:
+-                    pcm.rcsum[0] = addclip20(pcm.rcsum[0], rcadd2[4] >> 1, rcadd2[4] & 1);
+-                    break;
+-                case 31:
+-                    pcm.rcsum[1] = addclip20(pcm.rcsum[1], rcadd2[5] >> 1, rcadd2[5] & 1);
+-                    break;
+-            }
+-
+             pcm.rcsum[0] = addclip20(pcm.rcsum[0], rc0 >> 1, rc0 & 1);
+             pcm.rcsum[1] = addclip20(pcm.rcsum[1], rc1 >> 1, rc1 & 1);
+ 
+-            if (slot != pcm.config.reg_slots - 1)
++            if (slot != nslots - 1)
+             {
+                 pcm.ram1[31][1] = (uint32_t)suml;
+                 pcm.ram1[31][3] = (uint32_t)sumr;

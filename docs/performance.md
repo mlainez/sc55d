@@ -218,7 +218,7 @@ isolcpus=3 nohz_full=3 rcu_nocbs=3 irqaffinity=0-2
 
 ## Core patches
 
-`patches/` holds sixteen performance patches applied at build time (fifteen on the decoder2 branch, where 0003 is superseded) to a copy of
+`patches/` holds four performance patches applied at build time to a copy of
 the core; the submodule itself is never modified. They are **on by default** and
 **pass all 36 of upstream's own SC-55mk2 integration cases** — real MIDI files
 with published expected SHA-256 hashes of the rendered audio, an absolute

@@ -1,0 +1,176 @@
+mcu, pcm: group the per-instruction and per-tick fields ahead of the bulk arrays (ARM)
+
+An in-order AArch64 core is the target, and its addressing modes are the
+point of this patch: a scaled 12-bit immediate reaches 16380 bytes for a
+32-bit load and 4095 for a byte load. Upstream's mcu_t places 664 KiB of ROM
+and RAM arrays between the register file and the fields the interpreter
+touches on every instruction -- dev_register, the peripheral pointers, the
+romset flags, rom2_mask, the operand-decode scratch -- so every one of those
+loads needs its address materialised separately. pcm_t does the same to
+enable_oversampling, which sat at offset 15,763,532 past 15 MB of wave ROM,
+alone in a cache line, read once per sample.
+
+Field order is layout only: neither struct is serialised, memcpy'd or
+aggregate-initialised anywhere in the tree. The arrays move to the end and
+everything hot lands inside the immediate's reach -- for mcu_t within the
+first 344 bytes, the decoder's instruction-cache handle included.
+
+On x86-64 this changes nothing measurable (32-bit displacements). On a
+Cortex-A53 it is the largest single architecture-specific contribution in
+the series: counting the instructions actually executed on the mk2 path
+through MCU_Step, 37 upstream against 32 here, and measured as worst-second
+realtime on a Raspberry Pi 3B, removing the mcu_t half costs 2.7% and the
+pcm_t half 0.46%.
+
+--- a/src/backend/mcu.h
++++ b/src/backend/mcu.h
+@@ -232,7 +232,18 @@
+ 
+ void MCU_DefaultSampleCallback(void* userdata, const AudioFrame<int32_t>& frame);
+ 
++// Field order here is deliberate: everything the interpreter touches on every
++// instruction is grouped ahead of the six memory arrays, which together are
++// 664 KiB. Upstream has the arrays in the middle, which pushes dev_register,
++// the peripheral pointers, the romset flags and the operand-decode scratch out
++// past a 656 KiB hole from the register file. That costs nothing on x86-64,
++// whose addressing modes take a 32-bit displacement, but on AArch64 a byte load
++// with a scaled 12-bit immediate reaches only 4095 bytes from its base, so
++// every one of those fields needs its address materialised separately. The
++// reorder is layout-only: mcu_t is never serialised, memcpy'd or aggregate
++// initialised anywhere in the tree.
+ struct mcu_t {
++    // --- CPU state, touched by every instruction ---
+     uint16_t r[8]{};
+     uint16_t pc = 0;
+     uint16_t sr = 0;
+@@ -244,33 +255,15 @@
+     BoundedOrderedBitSet<16> trapa_pending;
+     uint64_t cycles = 0;
+ 
+-    uint8_t rom1[ROM1_SIZE]{};
+-    uint8_t rom2[ROM2_SIZE]{};
+-    uint8_t ram[RAM_SIZE]{};
+-    uint8_t sram[SRAM_SIZE]{};
+-    uint8_t nvram[NVRAM_SIZE]{};
+-    uint8_t cardram[CARDRAM_SIZE]{};
+-
+-    uint8_t dev_register[0x80]{};
+-
+-    uint16_t ad_val[4]{};
+-    uint8_t ad_nibble = 0;
+-    uint8_t sw_pos = 3;
+-    uint8_t io_sd = 0;
+-
++    // --- peripherals clocked from MCU_Step() ---
+     submcu_t* sm = nullptr;
+     pcm_t* pcm = nullptr;
+     mcu_timer_t* timer = nullptr;
+     lcd_t* lcd = nullptr;
+ 
+-    uint32_t uart_write_ptr = 0;
+-    uint32_t uart_read_ptr = 0;
+-    uint8_t uart_buffer[uart_buffer_size]{};
+-
+-    uint8_t uart_rx_byte = 0;
+-    uint64_t uart_rx_delay = 0;
+-    uint64_t uart_tx_delay = 0;
++    uint64_t analog_end_time = 0;
+ 
++    // --- fixed once the romset is known, read on every access ---
+     Romset romset = Romset::MK2;
+ 
+     bool is_mk1 = false; // 0 - SC-55mkII, SC-55ST. 1 - SC-55, CM-300/SCC-1
+@@ -282,6 +275,22 @@
+ 
+     uint32_t rom2_mask = ROM2_SIZE - 1;
+ 
++    // --- operand decode scratch, rewritten by every instruction ---
++    uint32_t operand_type = 0;
++    uint16_t operand_ea = 0;
++    uint8_t operand_ep = 0;
++    MCU_Operand_Size operand_size{};
++    uint8_t operand_reg = 0;
++    uint8_t operand_status = 0;
++    uint16_t operand_data = 0;
++    uint8_t opcode_extended = 0;
++
++    // --- I/O and front panel ---
++    uint16_t ad_val[4]{};
++    uint8_t ad_nibble = 0;
++    uint8_t sw_pos = 3;
++    uint8_t io_sd = 0;
++
+     bool ga_int[8]{};
+     uint8_t ga_int_enable = 0; // mask of ga_int indices
+     uint8_t ga_int_trigger = 0; // index into ga_int
+@@ -293,27 +302,35 @@
+     uint8_t p1_data = 0;
+ 
+     int adf_rd = 0;
+-
+-    uint64_t analog_end_time = 0;
+-
+     int ssr_rd = 0;
+ 
+-    uint32_t operand_type = 0;
+-    uint16_t operand_ea = 0;
+-    uint8_t operand_ep = 0;
+-    MCU_Operand_Size operand_size{};
+-    uint8_t operand_reg = 0;
+-    uint8_t operand_status = 0;
+-    uint16_t operand_data = 0;
+-    uint8_t opcode_extended = 0;
++    uint32_t uart_write_ptr = 0;
++    uint32_t uart_read_ptr = 0;
++    uint8_t uart_rx_byte = 0;
++    uint64_t uart_rx_delay = 0;
++    uint64_t uart_tx_delay = 0;
+ 
+     void* callback_userdata = nullptr;
+     mcu_sample_callback sample_callback = MCU_DefaultSampleCallback;
+ 
+ #if NUKED_ENABLE_DECODER2
+-    // Decoder state
++    // Decoder state. InstructionCache is an 8-byte handle, so it belongs here
++    // with the fields the interpreter touches per instruction rather than
++    // behind the bulk arrays below -- upstream declares it last, which on
++    // AArch64 puts it past the 664 KiB hole this patch exists to close.
+     decoder2::InstructionCache icache;
+ #endif
++
++    uint8_t dev_register[0x80]{};
++
++    // --- bulk memory: 664 KiB, kept out of the way of everything above ---
++    uint8_t rom1[ROM1_SIZE]{};
++    uint8_t rom2[ROM2_SIZE]{};
++    uint8_t ram[RAM_SIZE]{};
++    uint8_t sram[SRAM_SIZE]{};
++    uint8_t nvram[NVRAM_SIZE]{};
++    uint8_t cardram[CARDRAM_SIZE]{};
++    uint8_t uart_buffer[uart_buffer_size]{};
+ };
+ 
+ void MCU_Init(mcu_t& mcu, submcu_t& sm, pcm_t& pcm, mcu_timer_t& timer, lcd_t& lcd);
+--- a/src/backend/pcm.h
++++ b/src/backend/pcm.h
+@@ -77,6 +77,11 @@
+ 
+     PCM_Config config{};
+ 
++    // Read once per emulated PCM sample, alongside config.oversampling. Left at
++    // the end of the struct it sits 15 MiB past every other field PCM_Update()
++    // touches, on a cache line of its own that holds nothing else.
++    bool enable_oversampling = true;
++
+     uint16_t eram[0x4000]{};
+ 
+     uint8_t waverom1[0x200000]{};
+@@ -84,8 +89,6 @@
+     uint8_t waverom3[0x100000]{};
+     uint8_t waverom_card[0x200000]{};
+     uint8_t waverom_exp[0x800000]{};
+-
+-    bool enable_oversampling = true;
+ };
+ 
+ void PCM_Write(pcm_t& pcm, uint32_t address, uint8_t data);

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Differential check for the PCM patches (0008-0012).
+# Differential check for the PCM patch (0003-pcm-per-tick-work; formerly 0008-0012).
 #
 #   ./patches/tests/pcm/run.sh
 #
@@ -49,7 +49,7 @@ build "$WORK/src/backend/pcm.cpp" "$WORK/drv-ref"
 mkdir -p "$WORK/patched"
 cp -a "$WORK/src" "$WORK/patched/src"
 applied=0
-for p in "$REPO"/patches/00{08,09,10,11,12}-*.patch; do
+for p in "$REPO"/patches/0003-pcm-per-tick-work.patch; do
     [ -e "$p" ] || { echo "error: missing $p" >&2; exit 1; }
     if ! (cd "$WORK/patched" && patch -p1 --quiet --forward -i "$p"); then
         echo "error: $(basename "$p") did not apply — the core has moved" >&2
@@ -57,8 +57,8 @@ for p in "$REPO"/patches/00{08,09,10,11,12}-*.patch; do
     fi
     applied=$((applied + 1))
 done
-if [ "$applied" -ne 5 ]; then
-    echo "error: applied $applied patches, expected 5" >&2
+if [ "$applied" -ne 1 ]; then
+    echo "error: applied $applied patches, expected 1" >&2
     exit 1
 fi
 # A comparison against an unmodified candidate would pass trivially.

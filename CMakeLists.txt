@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 
 cmake_minimum_required(VERSION 3.20)
-project(sc55d VERSION 0.4.0 LANGUAGES C CXX)
+project(sc55d VERSION 0.5.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)          # the emulation core requires C++23
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -128,28 +128,14 @@ if(SC55D_PATCH_CORE)
     file(GLOB SC55D_PATCHES "${CMAKE_CURRENT_SOURCE_DIR}/patches/*.patch")
     list(SORT SC55D_PATCHES)
 
-    if(SC55D_DECODER2)
-        # 0003 fast-paths MCU_ReadCodeAdvance, which decoder2 takes off the hot
-        # path entirely -- upstream calls it invalidated and they are right.
-        list(FILTER SC55D_PATCHES EXCLUDE REGEX "/0003-mcu-code-fetch-fast-path\\.patch$")
-    endif()
-
-    # 0006 rewrites the tail of mcu_t, and the decoder2 sources add a member
-    # there -- textually, whether or not the new decoder is compiled -- so the
-    # 0006 variant follows the checkout, not the flag.
-    if(IS_DIRECTORY "${NUKED_DIR}/src/backend/decoder2")
-        # Substituted in place, not appended: series order matters, and
-        # patches/decoder2/0006 sorts after patches/0013 on full path.
-        set(_sc55d_series "")
-        foreach(_p IN LISTS SC55D_PATCHES)
-            if(_p MATCHES "/0006-mcu-hot-field-layout\\.patch$")
-                list(APPEND _sc55d_series
-                    "${CMAKE_CURRENT_SOURCE_DIR}/patches/decoder2/0006-mcu-hot-field-layout.patch")
-            else()
-                list(APPEND _sc55d_series "${_p}")
-            endif()
-        endforeach()
-        set(SC55D_PATCHES ${_sc55d_series})
+    # The series is written against the decoder2 sources (the layout patch
+    # reorders mcu_t around the decoder's instruction-cache member), which the
+    # submodule is pinned to. A master checkout can build unpatched.
+    if(NOT IS_DIRECTORY "${NUKED_DIR}/src/backend/decoder2")
+        message(FATAL_ERROR
+            "sc55d: patches/ is written against the core's decoder2 sources and "
+            "${NUKED_DIR} has none. Use the pinned submodule, or configure with "
+            "-DSC55D_PATCH_CORE=OFF to build that checkout unpatched.")
     endif()
 
     if(SC55D_PATCHES)
@@ -164,11 +150,6 @@ if(SC55D_PATCH_CORE)
         set(CORE_SRC_DIR "${CMAKE_BINARY_DIR}/core-patched")
 
         set(_sc55d_patch_hint "")
-        if(NOT SC55D_DECODER2 AND IS_DIRECTORY "${NUKED_DIR}/src/backend/decoder2")
-            set(_sc55d_patch_hint
-                "This checkout carries the decoder2 branch; that series needs "
-                "-DSC55D_DECODER2=ON.\n")
-        endif()
 
         # Start from a clean copy so re-configuring never double-applies.
         file(REMOVE_RECURSE "${CORE_SRC_DIR}")
