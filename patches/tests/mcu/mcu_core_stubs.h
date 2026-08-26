@@ -61,6 +61,7 @@ void PCM_Write(pcm_t&, uint32_t a, uint8_t v) { Note("PCM_Write", a, v); }
 uint8_t SM_SysRead(submcu_t&, uint32_t a) { Note("SM_SysRead", a); return (uint8_t)(0x5a ^ a); }
 void SM_SysWrite(submcu_t&, uint32_t a, uint8_t v) { Note("SM_SysWrite", a, v); }
 void SM_Update(submcu_t&, uint64_t c) { Note("SM_Update", c); }
+void SM_FF_Sync(submcu_t&, uint64_t) {}   /* patch 0016 hook in MCU_PostUART; nothing to rewind here */
 void TIMER2_Write(mcu_timer_t&, uint32_t a, uint8_t v) { Note("TIMER2_Write", a, v); }
 void TIMER_Clock(mcu_timer_t&, uint64_t c) { Note("TIMER_Clock", c); }
 void TIMER_NotifyRomsetChange(mcu_timer_t&) { Note("TIMER_NotifyRomsetChange"); }

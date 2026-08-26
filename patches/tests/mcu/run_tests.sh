@@ -66,8 +66,10 @@ $CXX $FLAGS -c "$CORE/src/backend/submcu.cpp" -o "$OUT/submcu_probe.o"
 SM_RENAMES=$(nm -C --defined-only "$OUT/submcu_probe.o" \
     | awk '$2=="T"||$2=="D"{sub(/\(.*/,"",$3); print $3}' | sort -u \
     | awk '{printf "-D%s=Ref_%s ", $1, $1}')
+# From a neutral copy, so the TU sees the patched headers (see the 0016 section).
+cp "$PRISTINE/src/backend/submcu.cpp" "$OUT/upstream_tu/submcu_scan.cpp"
 # shellcheck disable=SC2086
-$CXX $FLAGS $SM_RENAMES -c "$PRISTINE/src/backend/submcu.cpp" -o "$OUT/ref_submcu.o"
+$CXX $FLAGS $SM_RENAMES -c "$OUT/upstream_tu/submcu_scan.cpp" -o "$OUT/ref_submcu.o"
 SM_SRC="$HERE/sm_interrupt_scan_equivalence.cpp $CORE/src/backend/submcu.cpp $OUT/ref_submcu.o"
 $CXX $FLAGS -o "$OUT/smscan" $SM_SRC
 run sm_interrupt_scan_equivalence 0 "$OUT/smscan"
@@ -83,6 +85,46 @@ for b in 1 2 3 4; do
     $CXX $FLAGS -DBREAK_WORD=$b -o "$OUT/word.b$b" \
         "$HERE/mcu_word_access_equivalence.cpp" "$CORE/src/backend/mcu.cpp"
     run "mcu_word_access (broken $b, must fail)" 1 "$OUT/word.b$b"
+done
+
+# --- 0016: sub-MCU idle-loop fast-forward ------------------------------------
+# Both TUs are compiled from NEUTRAL copies: a quoted #include "mcu.h" resolves
+# from the source file's own directory first, and upstream's mcu.h has a
+# different mcu_t layout from the patched one (0006). Two layouts in one
+# program is a silent, catastrophic mismatch -- it was, once.
+cp "$PRISTINE/src/backend/submcu.cpp" "$OUT/upstream_tu/submcu_ff.cpp"
+cp "$CORE/src/backend/submcu.cpp" "$OUT/upstream_tu/patched_submcu_ff.cpp"
+# shellcheck disable=SC2086
+$CXX $FLAGS $SM_RENAMES -c "$OUT/upstream_tu/submcu_ff.cpp" -o "$OUT/ref_submcu_ff.o"
+FF_SRC="$HERE/sm_fastforward_equivalence.cpp $OUT/upstream_tu/patched_submcu_ff.cpp $OUT/ref_submcu_ff.o"
+$CXX $FLAGS -o "$OUT/ff" $FF_SRC
+# SM_ROM (path to the mk2 sub-MCU ROM image) adds the real firmware to the run; without it the synthetic programs still prove the property.
+# FF_STEPS scales the run (synthetic programs; the firmware gets 4x): 1M keeps the
+# whole harness under a few minutes and still crosses ~250k synchronisation points.
+FF_STEPS=${FF_STEPS:-1000000}
+run() { # name expect-exit binary [args]
+    printf '%-46s ' "$1"
+    if "$3" ${4:-} > "$OUT/$1.log" 2>&1; then got=0; else got=1; fi
+    tail -1 "$OUT/$1.log" | tr -d '\n'
+    if [ "$got" = "$2" ]; then echo "   [ok]"; else echo "   [UNEXPECTED exit $got]"; fail=1; fi
+}
+run sm_fastforward_equivalence 0 "$OUT/ff" "$FF_STEPS"
+# Mutants are produced from the patched source: each removes or breaks one guard the proof rests on.
+python3 - "$OUT/upstream_tu/patched_submcu_ff.cpp" "$OUT" <<'PYEOF'
+import sys
+src=open(sys.argv[1]).read(); out=sys.argv[2]
+muts={1:("limit -= 1;","limit += 47;"),                                  # timer fire bound off by one: overshoots the fire
+      2:("(now - sm.ff_c0 + 47) / 48","(now - sm.ff_c0) / 48"),            # rewind lands one instruction early
+      3:("    sm.timer_cycles = sm.ff_timer_cycles0;\n    sm.timer_prescaler = sm.ff_timer_prescaler0;\n    sm.timer_counter = sm.ff_timer_counter0;\n    SM_UpdateTimer(sm);\n",""),  # rewind forgets the timer
+      4:("        sm.ram[address] = data;\n        return;\n    }\n    sm.ff_impure = 1;","        sm.ram[address] = data;\n        return;\n    }\n"),  # shared-RAM writes counted as pure
+      5:("                    if (mcu.uart_rx_delay <= sm.cycles)\n                        limit = sm.cycles;\n                    else if (mcu.uart_rx_delay - 1 < limit)\n                        limit = mcu.uart_rx_delay - 1;\n","")}  # pending UART byte ignored
+for k,(a,b) in muts.items():
+    assert src.count(a)==1, ("mutant anchor", k, src.count(a))
+    open(f"{out}/upstream_tu/ff_mutant{k}.cpp","w").write(src.replace(a,b,1))
+PYEOF
+for b in 1 2 3 4 5; do
+    $CXX $FLAGS -o "$OUT/ff.b$b" "$HERE/sm_fastforward_equivalence.cpp" "$OUT/upstream_tu/ff_mutant$b.cpp" "$OUT/ref_submcu_ff.o"
+    run "sm_fastforward (broken $b, must fail)" 1 "$OUT/ff.b$b" "$FF_STEPS"
 done
 
 [ "$fail" = 0 ] && echo "all tests behaved as expected" || echo "SOMETHING BEHAVED UNEXPECTEDLY"

@@ -30,6 +30,7 @@
 
 void SM_HandleInterrupt(submcu_t& sm);
 
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -101,8 +102,12 @@ void Check(submcu_t& a, submcu_t& b, submcu_t& c,
            const std::vector<StubCall>& la, const std::vector<StubCall>& lb,
            const std::vector<StubCall>& lc, const char* which)
 {
-    if (memcmp(&a, &b, sizeof(submcu_t)) != 0 || !SameCalls(la, lb)
-        || memcmp(&c, &b, sizeof(submcu_t)) != 0 || !SameCalls(lc, lb))
+    /* Compare the machine state, not the bookkeeping patch 0016 appends after
+     * uart_rx_gotbyte (its fast-forward fields are internal and legitimately
+     * differ from upstream's, which has none). */
+    const size_t observable = offsetof(submcu_t, ff_trace);
+    if (memcmp(&a, &b, observable) != 0 || !SameCalls(la, lb)
+        || memcmp(&c, &b, observable) != 0 || !SameCalls(lc, lb))
     {
         if (failures < 10)
             printf("MISMATCH %s req=%02x coll=%02x en=%02x sr=%02x\n", which,
