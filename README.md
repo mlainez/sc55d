@@ -232,6 +232,7 @@ late while the emulator was fine — more buffer or better isolation is the answ
 | [Core patches](patches/README.md) | The performance patches, how they are validated, and what was tried and rejected |
 | [SIMD, GPU offload, ARM libraries](docs/arm-optimization.md) | Whether NEON or the GPU can help (mostly no, and why) — plus the Pi 3 verdict this document got wrong, and what the mistake was |
 | [Backend options](docs/backend-options.md) | What replacing the emulation core would mean — written when a Pi 3 looked unreachable, and marked where that no longer holds |
+| [Matching libEmuSC to the SC-55](docs/emusc-matching-protocol.md) | A black-box protocol for making the free engine sound like the reference, and how far it can realistically go |
 
 ## How it works, briefly
 
