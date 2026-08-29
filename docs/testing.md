@@ -51,7 +51,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSC55D_CPU=cortex-a53 \
 Short of a real Pi, the following were checked here, on x86-64 with a real
 `mk2-v1.01` ROM set:
 
-- **Emulation accuracy.** The patched core reproduces all 36 of upstream's own
+- **Emulation accuracy.** The patched core reproduces all 37 of upstream's own
   SC-55mk2 integration cases, byte for byte against their published SHA-256
   hashes. See [patches/README.md](../patches/README.md).
 - **Cross-architecture agreement.** Cross-compiled for `-mcpu=cortex-a53`

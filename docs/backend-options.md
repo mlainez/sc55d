@@ -7,8 +7,11 @@
 > **+93.8%** on a Pi 3, taking SC-55 mk1 from 0.715x to **1.386x realtime**. The
 > board runs the mk1 romsets today, through the onboard jack, with no dropouts.
 >
-> What still stands: a Pi 3 cannot run the **mkII** romsets (0.811x patched),
-> Munt remains structurally unable to emulate an SC-55, and libEmuSC remains the
+> (That verdict fell even further since: with upstream's decoder2 branch and
+> the reduced four-patch series — sc55d v0.5.0 — a Pi 3 holds the **mkII** at
+> 1.236x worst-second at stock clock.)
+>
+> What still stands: Munt remains structurally unable to emulate an SC-55, and libEmuSC remains the
 > only real alternative if the non-commercial licence is a problem. The document
 > is kept because the analysis of *why* the core is expensive is still accurate
 > and still useful — only its verdict on what optimisation could achieve was

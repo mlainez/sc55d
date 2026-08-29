@@ -14,9 +14,10 @@
 >
 > What still stands: everything in the table below. NEON, the GPU and ARM DSP
 > libraries were correctly rejected, and the gains came from exactly where this
-> document says to look — scalar work removal, ranked at the end. A Pi 3 still
-> cannot run the **mkII** romsets (0.811x). Numbers in
-> [performance.md](performance.md).
+> document says to look — scalar work removal, ranked at the end. The mkII
+> verdict fell later still: with upstream's decoder2 and the reduced four-patch
+> series (sc55d v0.5.0) a Pi 3 holds the **mkII** at 1.236x at stock clock.
+> Numbers in [performance.md](performance.md).
 
 Whether a Raspberry Pi's vector unit, its GPU, or an off-the-shelf ARM-optimised
 library can be pointed at this workload. Short answers first:
@@ -99,7 +100,9 @@ unknowns — their headroom and the hardware ratio — and only one of them was
 checkable from here. `scripts/pi-check.sh --roms <dir>` on the actual board is
 what settles it, and running it earlier would have settled it sooner.
 
-A Pi 3 still cannot run the **mkII** romsets: 0.811x patched, under realtime.
+A Pi 3 now runs the **mkII** romsets: 1.236x worst-second with decoder2 and
+the v0.5.0 four-patch series, at stock clock (it was 0.811x when this was
+written).
 
 ### What is worth borrowing
 

@@ -30,39 +30,42 @@ the line**; below it the board cannot keep up and no amount of buffering fixes
 it. Measured on the boards themselves, patched and unpatched builds compiled
 identically:
 
-| board | romset | unpatched | with `patches/` |
+| board | romset | stock decoder2 core | with `patches/` |
 |---|---|---|---|
-| **Pi 3** | **mk1 / SC-155** | **0.715x** | **1.386x** |
-| Pi 3 | mkII | 0.458x | 0.811x — still too slow |
-| Pi 4 | mk1 / SC-155 | 1.497x | 2.916x |
-| **Pi 4** | **mkII** | **0.928x** | **1.691x** |
+| Pi 3 | mk1 / SC-155 | 0.821x | 1.603x |
+| **Pi 3** | **mkII** | **0.500x** | **1.236x** |
+| Pi 4 | mk1 / SC-155 | 1.750x | 3.415x |
+| Pi 4 | mkII | 1.065x | 2.676x |
 
 Three things worth taking from that table.
 
-**The core patches are not a tuning option.** For the romset each board is
-actually asked to run, they are the difference between working and not: mk1 on a
-Pi 3 is 0.715x without them, mkII on a Pi 4 is 0.928x. Both are under realtime.
-The only combination that runs unpatched is mk1 on a Pi 4.
+**The core patches are not a tuning option.** On the stock core the only
+combination that holds realtime with margin is mk1 on a Pi 4: the mkII sits at
+half of realtime on a Pi 3 and at 1.065x — realtime with nothing spare — on a
+Pi 4. Patched, every combination holds with headroom.
 
-**They are worth about twice as much on ARM as on x86** — +94% on a Pi 3 against
-+43.5% on a Xeon. Removed work is genuinely saved on an in-order Cortex-A53,
-where a wide out-of-order core hides some of it.
+**They matter far more on ARM than on x86.** The same series removes 56% of
+retired instructions on x86, where a desktop already holds realtime without it;
+on the in-order Cortex-A53 it is the difference between half of realtime and
+realtime with headroom. One of the four patches does nothing at all on x86 and
+is kept, clearly labeled, for ARM.
 
-**A Pi 3 still cannot run the mkII romsets.** 0.811x is under realtime, and that
-is the honest boundary of what this does.
+**A Pi 3 runs the mkII romsets at stock clock.** 1.236x worst-second, measured
+on the original 1.2 GHz Pi 3B — the slowest Pi 3 — with the densest track in
+the corpus playing through with zero starves. A 3B+ at 1400 MHz has ~17% more
+clock on the same core.
 
 The patches are validated **bit-identical** to the unpatched core — same audio
-digest on a Pi 3, a Pi 4 and x86-64 — and the patched core passes all 36 of
-upstream's own SC-55mk2 integration cases byte for byte. Details and method:
+digest on a Pi 3, a Pi 4 and x86-64 — and the patched core passes all 37 of
+upstream's own SC-55mk2-family integration cases byte for byte. Details and method:
 [Performance](docs/performance.md), [Core patches](patches/README.md).
 
 ## What you'll need
 
-- **A Raspberry Pi 4 or 5**, or a **Pi 3** for the mk1-generation romsets.
-  Measured: a Pi 3 renders SC-55 mk1 at 1.39x realtime and cannot run the mkII
-  romsets (0.81x, under realtime); a Pi 4 runs both, at 2.92x and 1.69x. A DAC
-  is optional — the onboard jack holds mk1 on a Pi 3 with zero dropouts. See
-  [Performance](docs/performance.md).
+- **Any Raspberry Pi from the 3 up.** Measured at stock clocks: a Pi 3B renders
+  SC-55 mk1 at 1.60x realtime and the mkII at 1.24x; a Pi 4 runs them at 3.42x
+  and 2.68x. A DAC is optional — the onboard jack holds both generations on a
+  Pi 3 with zero dropouts. See [Performance](docs/performance.md).
 - **Raspberry Pi OS Lite, 64-bit.** The 32-bit image is markedly slower here.
 - **SC-55 ROM files** — the original module's firmware and sounds. sc55d ships
   none of it; the ROMs are Roland's copyright and have to come from hardware you

@@ -8,58 +8,50 @@ if the audio glitches. If you only read one section, read
 ## What the core patches buy
 
 **Measured with a real SC-55mk2 ROM set** (`mk2-v1.01`), rendering the
-benchmark's dense sixteen-part sequence for 30 seconds on an Intel Xeon at
-2.8 GHz:
+benchmark's dense sixteen-part sequence for 30 seconds, against the baseline
+sc55d pins: upstream's decoder2 core. On x86 the series removes **56.4% of
+retired instructions** (3.198 G → 1.396 G per emulated second, callgrind) —
+but a desktop already holds realtime on the stock core, so there it is a
+nicety. The patches are validated bit-identical on this romset — see
+[patches/README.md](../patches/README.md).
 
-| | realtime ratio |
-|---|---|
-| unpatched core | 2.70x |
-| **with `patches/`** (default) | **3.87x**, worst second 3.44x |
+### On ARM, where it decides what runs
 
-That is **+43.5%**, and it corroborates the −45.1% drop in retired instructions
-measured separately. The patches are validated bit-identical on this romset —
-see [patches/README.md](../patches/README.md).
+Worst-second realtime ratios on real boards, stock clocks, patched and
+unpatched cross-compiled identically, `-mcpu=` matched to the board,
+`performance` governor, no throttling:
 
-### On ARM, where it matters more
-
-The x86 figure understates it badly. Measured on real boards, same 30-second
-dense sequence, patched and unpatched cross-compiled identically with GCC 14.3
-and `-mcpu=` matched to the board, `performance` governor, no throttling:
-
-| board | romset | unpatched | patched | |
+| board | romset | stock decoder2 | patched | |
 |---|---|---|---|---|
-| **Pi 3** (A53, 1200 MHz) | **mk1** | **0.715x** | **1.386x** | +93.8% |
-| Pi 3 | mk2 | 0.458x | 0.811x | +77.1% |
-| **Pi 4** (A72, 1500 MHz) | mk1 | 1.497x | 2.916x | +94.8% |
-| **Pi 4** | **mk2** | **0.928x** | **1.691x** | +82.2% |
+| Pi 3 (A53, 1200 MHz) | mk1 | 0.821x | 1.603x | +95% |
+| **Pi 3** | **mk2** | **0.500x** | **1.236x** | **+147%** |
+| Pi 4 (A72, 1500 MHz) | mk1 | 1.750x | 3.415x | +95% |
+| Pi 4 | mk2 | 1.065x | 2.676x | +151% |
 
-**The patches roughly double throughput on ARM** — about twice what they give an
-out-of-order Xeon (+43.5%). That is the expected direction: work removed is work
-genuinely saved on an in-order A53, where a wide out-of-order core hides some of
-it. The A72 is out-of-order too and still gains ~90%, so most of it is real work
-removed rather than scheduling luck.
+**The patches roughly double-to-2.5x throughput on ARM** against −56% of
+instructions on x86. That is the expected direction: work removed is work
+genuinely saved on an in-order A53, where a wide out-of-order core hides some
+of it — and one patch (the hot-field layout) is exactly 0.00% on x86 and +4.7%
+on the A53, which is why it exists at all.
 
-Two rows carry the whole argument for this repo existing, and they are the two
-in bold:
+Two rows carry the whole argument for this repo existing:
 
-- **mk1 on a Pi 3 renders at 0.715x unpatched** — nowhere near realtime.
-  Patched it clears it with 39% to spare.
-- **mk2 on a Pi 4 renders at 0.928x unpatched** — still under. Patched, 1.691x.
+- **mk2 on a Pi 3 renders at 0.500x on the stock core** — half of realtime.
+  Patched it holds 1.236x at stock clock on the original 1.2 GHz 3B, and the
+  densest track in the corpus plays through with zero starves.
+- **mk2 on a Pi 4 renders at 1.065x on the stock core** — realtime with
+  nothing spare. Patched, 2.676x.
 
-So on both boards, for the romset each is actually asked to run, the patches are
-not a tuning option. They are the difference between working and not. The only
-combination that runs unpatched is mk1 on a Pi 4, at 1.497x.
-
-The other thing these numbers settle: **a Pi 3 cannot run the mkII romsets.**
-0.811x is under realtime and no amount of buffering fixes a renderer that cannot
-keep up — it only delays the dropout.
+So for the mkII the patches are the difference between working and
+not-really-working on both boards; the mk1-generation romsets hold unpatched
+only on a Pi 4 and gain the same ~2x everywhere.
 
 Every digest above is **identical between the patched and unpatched builds**,
 and identical between the Pi 3, the Pi 4 and x86-64: `c090f4a7b860f585` for mk1,
 `6154f44b25c3b441` for mk2. The patches are bit-exact, and the emulation agrees
 across architectures on real hardware rather than only under qemu.
 
-Where the time goes with real firmware, unpatched: `PCM_Update` 31.4%,
+Where the time goes with real firmware, unpatched (profiled on the pre-decoder2 core; decoder2 shrinks the CPU share, the shape stands): `PCM_Update` 31.4%,
 `TIMER_Clock` 26.0%, `SM_Update` 11.9%, `unscramble` 4.2% (startup),
 `PCM_ReadROM` 3.7%, `calc_tv` 3.5%.
 
@@ -220,7 +212,7 @@ isolcpus=3 nohz_full=3 rcu_nocbs=3 irqaffinity=0-2
 
 `patches/` holds four performance patches applied at build time to a copy of
 the core; the submodule itself is never modified. They are **on by default** and
-**pass all 36 of upstream's own SC-55mk2 integration cases** — real MIDI files
+**pass all 37 of upstream's own SC-55mk2 integration cases** — real MIDI files
 with published expected SHA-256 hashes of the rendered audio, an absolute
 reference rather than a comparison against ourselves. Each patch also has a
 ROM-free equivalence test with deliberate mutants. `-DSC55D_PATCH_CORE=OFF`
